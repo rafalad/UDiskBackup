@@ -9,11 +9,14 @@ RUN dotnet publish -c Release -o /out
 # ---------- runtime ----------
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 ENV ASPNETCORE_URLS=http://0.0.0.0:8080
-# narzędzia, których używa appka: lsblk/rsync/du + dbus (tylko klient)
+
+# narzędzia: lsblk/rsync/du + dbus + udev (dla udevadm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    util-linux rsync procps coreutils dbus ca-certificates && \
+    util-linux rsync procps coreutils dbus udev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /out ./
 EXPOSE 8080
 ENTRYPOINT ["dotnet","UDiskBackup.dll"]
+

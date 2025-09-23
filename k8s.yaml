@@ -35,9 +35,6 @@ spec:
         - name: host-sys            # lsblk/udev widzą prawdziwy sprzęt
           mountPath: /sys
           readOnly: true
-        - name: host-dev            # ostrożnie: tylko do odczytu
-          mountPath: /host-dev
-          readOnly: true
         - name: host-dbus           # socket systemowego D-Bus (UDisks2 events)
           mountPath: /run/dbus/system_bus_socket
           readOnly: true
@@ -67,8 +64,6 @@ spec:
         hostPath: { path: /run/media, type: DirectoryOrCreate }
       - name: host-sys
         hostPath: { path: /sys, type: Directory }
-      - name: host-dev
-        hostPath: { path: /dev, type: Directory }
       - name: host-dbus
         hostPath: { path: /run/dbus/system_bus_socket, type: Socket }
       - name: host-run-udev

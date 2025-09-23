@@ -5,106 +5,185 @@ namespace UDiskBackup;
 
 public class DiskInfoService
 {
-    private static readonly JsonSerializerOptions JsonOpts = new()
+    public async Task<IReadOnlyList<DiskDevice>> GetDisksAsync()
     {
-        PropertyNameCaseInsensitive = true
-    };
+        var result = new List<DiskDevice>();
 
-    public async Task<IReadOnlyList<DiskDto>> GetDisksAsync()
-    {
-        // Wywołanie lsblk -JO (JSON + rozbudowane pola)
-        var lsblkJson = await Run("lsblk", "-JO");
-        using var doc = JsonDocument.Parse(lsblkJson);
-        var blockdevices = doc.RootElement.GetProperty("blockdevices");
+        // Minimalny zestaw kolumn, których używa UI
+        var cols = "NAME,TYPE,SIZE,ROTA,TRAN,VENDOR,MODEL,SERIAL,PATH,FSTYPE,MOUNTPOINT";
+        var (exit, stdout, stderr) = await Run("lsblk", $"-J -O -b -o {cols}");
+        if (exit != 0 || string.IsNullOrWhiteSpace(stdout))
+            return result;
 
-        var result = new List<DiskDto>();
+        using var doc = JsonDocument.Parse(stdout);
+        if (!doc.RootElement.TryGetProperty("blockdevices", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return result;
 
-        foreach (var dev in blockdevices.EnumerateArray())
+        foreach (var node in arr.EnumerateArray())
         {
-            var type = dev.GetProperty("type").GetString() ?? "";
-            var name = dev.GetProperty("name").GetString() ?? "";
+            var type = GetString(node, "type");
+            if (type is not ("disk" or "rom"))
+                continue;
 
-            // pomiń loop/ram, jeśli nie chcesz ich widzieć w tabeli
-            if (type is "loop" or "ram") continue;
+            var dev = BuildDisk(node);
+            if (dev != null)
+                result.Add(dev);
+        }
 
-            string path  = "/dev/" + name;
-            string size  = dev.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
-            string vendor = dev.TryGetProperty("vendor", out var v) ? v.GetString() ?? "" : "";
-            string model  = dev.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "";
-            string serial = dev.TryGetProperty("serial", out var s) ? s.GetString() ?? "" : "";
-
-            bool rotational = false;
-            if (dev.TryGetProperty("rota", out var rota))
+        // Fallback: popraw "transport" na podstawie udevadm/sysfs,
+        // jeśli lsblk podał pusty/unknown (typowe dla JMicron).
+        for (int i = 0; i < result.Count; i++)
+        {
+            var d = result[i];
+            if (string.IsNullOrWhiteSpace(d.Transport) || d.Transport!.Equals("unknown", StringComparison.OrdinalIgnoreCase))
             {
-                if (rota.ValueKind == JsonValueKind.Number) rotational = rota.GetInt32() == 1;
-                else if (rota.ValueKind == JsonValueKind.True) rotational = true;
-            }
-
-            // transport z sysfs (najpewniejsze)
-            string transport = ReadSys($"/sys/class/block/{name}/device/transport")?.Trim().ToLowerInvariant()
-                               ?? (ReadSys($"/sys/class/block/{name}/subsystem/uevent")?.Contains("nvme", StringComparison.OrdinalIgnoreCase) == true
-                                   ? "nvme" : "unknown");
-
-            string diskType = GuessDiskType(rotational, transport, type);
-
-            // partycje
-            var parts = new List<PartitionDto>();
-            if (dev.TryGetProperty("children", out var ch) && ch.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var p in ch.EnumerateArray())
+                var name = System.IO.Path.GetFileName(d.Path);
+                var detected = await DetectTransportFallbackAsync(d.Path, name);
+                if (!string.IsNullOrWhiteSpace(detected))
                 {
-                    if ((p.GetProperty("type").GetString() ?? "") != "part") continue;
-                    var pname = p.GetProperty("name").GetString() ?? "";
-                    parts.Add(new PartitionDto(
-                        Name: pname,
-                        Path: "/dev/" + pname,
-                        FsType: p.TryGetProperty("fstype", out var pf) ? pf.GetString() : null,
-                        MountPoint: p.TryGetProperty("mountpoint", out var pm) ? pm.GetString() : null,
-                        Uuid: p.TryGetProperty("uuid", out var pu) ? pu.GetString() : null,
-                        Size: p.TryGetProperty("size", out var ps) ? ps.GetString() ?? "" : ""
-                    ));
+                    result[i] = d with { Transport = detected };
+                }
+                else if (name.StartsWith("nvme", StringComparison.OrdinalIgnoreCase))
+                {
+                    result[i] = d with { Transport = "nvme" };
                 }
             }
-
-            result.Add(new DiskDto(
-                Name: name,
-                Path: path,
-                Transport: transport,
-                Type: diskType,
-                Vendor: vendor,
-                Model: model,
-                Serial: serial,
-                Size: size,
-                Rotational: rotational,
-                Partitions: parts
-            ));
         }
 
         return result;
     }
 
-    private static string GuessDiskType(bool rotational, string transport, string lsblkType)
-        => transport == "nvme" ? "nvme"
-         : lsblkType == "rom"  ? "rom"
-         : rotational          ? "hdd"
-         : "ssd";
+    // ---- helpers ----
 
-    private static async Task<string> Run(string file, string args)
+    private static DiskDevice? BuildDisk(JsonElement node)
+    {
+        var name = GetString(node, "name");
+        if (string.IsNullOrEmpty(name)) return null;
+
+        var path = GetString(node, "path");
+        if (string.IsNullOrEmpty(path))
+            path = "/dev/" + name;
+
+        var sizeBytes = GetLong(node, "size");
+        var sizeHuman = sizeBytes.HasValue ? Human(sizeBytes.Value) : null;
+
+        var rotational = GetInt(node, "rota") == 1;
+
+        var tran = GetString(node, "tran"); // bywa null/unknown dla niektórych mostków USB
+
+        var vendor = GetString(node, "vendor");
+        var model  = GetString(node, "model");
+        var serial = GetString(node, "serial");
+
+        var parts = new List<Partition>();
+        if (node.TryGetProperty("children", out var ch) && ch.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var p in ch.EnumerateArray())
+            {
+                var pType = GetString(p, "type");
+                if (pType is not ("part" or "crypt" or "raid"))
+                    continue;
+
+                var pName = GetString(p, "name");
+                var pPath = GetString(p, "path");
+                if (string.IsNullOrEmpty(pPath))
+                    pPath = "/dev/" + pName;
+
+                var pSizeBytes = GetLong(p, "size");
+                var pSizeHuman = pSizeBytes.HasValue ? Human(pSizeBytes.Value) : null;
+
+                var fstype = GetString(p, "fstype");
+                var mp     = GetString(p, "mountpoint"); // lsblk zwraca 'mountpoint' lower-case
+
+                parts.Add(new Partition(
+                    Path: pPath!,
+                    FsType: fstype,
+                    MountPoint: string.IsNullOrWhiteSpace(mp) ? null : mp,
+                    Size: pSizeHuman
+                ));
+            }
+        }
+
+        return new DiskDevice(
+            Path: path!,
+            Type: GetString(node, "type") ?? "disk",
+            Transport: string.IsNullOrWhiteSpace(tran) ? null : tran,
+            Vendor: string.IsNullOrWhiteSpace(vendor) ? null : vendor,
+            Model: string.IsNullOrWhiteSpace(model) ? null : model,
+            Serial: string.IsNullOrWhiteSpace(serial) ? null : serial,
+            Size: sizeHuman,
+            Rotational: rotational,
+            Partitions: parts
+        );
+    }
+
+    private static async Task<string?> DetectTransportFallbackAsync(string devPath, string devName)
+    {
+        // 1) udevadm properties -> ID_BUS=usb (najpewniejsze)
+        var (e1, props, _) = await Run("udevadm", $"info -q property -n {devPath}");
+        if (e1 == 0 && !string.IsNullOrWhiteSpace(props))
+        {
+            foreach (var line in props.Split('\n'))
+            {
+                var ln = line.Trim();
+                if (ln.StartsWith("ID_BUS=", StringComparison.OrdinalIgnoreCase))
+                {
+                    var bus = ln.Substring("ID_BUS=".Length).Trim().ToLowerInvariant();
+                    if (bus == "usb") return "usb";
+                }
+                if (ln.StartsWith("ID_USB_DRIVER=", StringComparison.OrdinalIgnoreCase))
+                {
+                    // np. usb-storage
+                    return "usb";
+                }
+            }
+        }
+
+        // 2) udevadm path -> ścieżka sysfs zawiera /usb/
+        var (e2, sysPath, _) = await Run("udevadm", $"info -q path -n {devPath}");
+        if (e2 == 0 && sysPath.Contains("/usb", StringComparison.OrdinalIgnoreCase))
+            return "usb";
+
+        // 3) heurystyka po nazwie (NVMe już wyłapujemy wyżej)
+        if (devName.StartsWith("sd", StringComparison.OrdinalIgnoreCase))
+        {
+            // Bezpiecznie zwróć null zamiast 'unknown' – UI pokaże „-”,
+            // a jeżeli to faktycznie USB, zwykle pkt 1-2 to wykryją.
+            return null;
+        }
+
+        return null;
+    }
+
+    private static string? GetString(JsonElement e, string name)
+        => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String ? v.GetString() : null;
+
+    private static int? GetInt(JsonElement e, string name)
+        => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.Number ? v.GetInt32() : null;
+
+    private static long? GetLong(JsonElement e, string name)
+        => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.Number ? v.GetInt64() : null;
+
+    private static string Human(long bytes)
+    {
+        string[] u = ["B","KB","MB","GB","TB","PB"];
+        var n = (double)bytes; var i = 0;
+        while (n >= 1024 && i < u.Length - 1) { n /= 1024; i++; }
+        return n < 10 ? $"{n:0.##} {u[i]}" : n < 100 ? $"{n:0.#} {u[i]}" : $"{n:0} {u[i]}";
+    }
+
+    private static async Task<(int exit, string stdout, string stderr)> Run(string file, string args)
     {
         var psi = new ProcessStartInfo(file, args)
         {
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError  = true,
+            UseShellExecute = false
         };
         using var p = Process.Start(psi)!;
-        var stdout = await p.StandardOutput.ReadToEndAsync();
-        var stderr = await p.StandardError.ReadToEndAsync();
+        var so = await p.StandardOutput.ReadToEndAsync();
+        var se = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
-        if (p.ExitCode != 0)
-            throw new Exception($"{file} {args} failed: {stderr}");
-        return stdout;
+        return (p.ExitCode, so, se);
     }
-
-    private static string? ReadSys(string path)
-        => System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
 }

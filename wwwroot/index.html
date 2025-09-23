@@ -9,7 +9,7 @@
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:2rem;background:var(--bg);color:#111}
     h1{margin-top:0}
     .row{display:grid;grid-template-columns:1fr;gap:1rem}
-    @media(min-width:900px){.row{grid-template-columns: 1fr 2fr}}
+    @media(min-width:1100px){.row{grid-template-columns: 1fr 2fr}}
     .panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1rem;box-shadow:0 1px 2px rgba(0,0,0,.04)}
     .status{display:flex;align-items:center;gap:.75rem}
     .dot{width:.75rem;height:.75rem;border-radius:50%}
@@ -29,6 +29,9 @@
     .banner{border:1px solid var(--bd);border-left-width:6px;border-radius:10px;padding:.65rem .8rem;margin:0 0 1rem 0;display:flex;gap:.6rem;align-items:center}
     .banner.bad{background:#fee2e2;border-left-color:#ef4444}
     .banner.ok{background:#dcfce7;border-left-color:#22c55e}
+    .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid var(--bd);font-size:.78rem}
+    .pill.ok{background:#dcfce7} .pill.bad{background:#fee2e2}
+    code{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:.05rem .3rem}
   </style>
 </head>
 <body>
@@ -48,7 +51,7 @@
   <!-- BANER USB -->
   <div id="usb-banner" class="banner bad" style="display:none">
     <strong>Brak zamontowanego dysku USB.</strong>
-    <span class="muted">Podłącz dysk USB, aby uruchomić backup.</span>
+    <span class="muted">Podłącz dysk USB, a następnie kliknij „Odśwież”.</span>
   </div>
   <div id="usb-banner-ok" class="banner ok" style="display:none">
     <strong>Wykryto dysk(i) USB:</strong>
@@ -72,14 +75,14 @@
     <div class="panel">
       <div class="actions">
         <button class="btn" id="refresh">Odśwież</button>
-        <span class="muted">Automatycznie odświeża się przy podpięciu/odpięciu USB oraz co 7 s.</span>
+        <span class="muted">Skanowanie ręczne: kliknij, aby wykryć aktualne dyski.</span>
       </div>
       <hr style="border:none;border-top:1px solid var(--bd);margin:.8rem 0">
       <div class="status">
         <div id="usb-dot" class="dot bad"></div>
         <div>
           <div id="usb-title"><strong>Brak podłączonego dysku USB</strong></div>
-          <div class="muted" id="usb-sub">Podłącz dysk, aby zobaczyć jego parametry.</div>
+          <div class="muted" id="usb-sub">Podłącz dysk, a potem kliknij „Odśwież”.</div>
         </div>
       </div>
 
@@ -101,6 +104,32 @@
     </div>
   </div>
 
+  <!-- HISTORIA BACKUPÓW -->
+  <div class="panel" style="margin-top:1rem">
+    <div class="actions" style="justify-content:space-between;flex-wrap:wrap">
+      <div><strong>Historia backupów</strong></div>
+      <div style="display:flex;gap:.5rem;align-items:center">
+        <label class="muted">Filtr (mount):</label>
+        <select id="hist-filter" class="btn" style="min-width:220px"></select>
+        <button class="btn" id="hist-refresh">Odśwież</button>
+      </div>
+    </div>
+    <table id="hist">
+      <thead>
+        <tr>
+          <th>Start (lokalnie)</th>
+          <th>Wynik</th>
+          <th>Przesłane</th>
+          <th>Plików</th>
+          <th>Czas</th>
+          <th>Cel (mount)</th>
+          <th>Podsumowanie</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <!-- SignalR client z CDN -->
@@ -110,9 +139,11 @@
     async function fetchJson(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
     function human(b){ if(b==null) return '-'; const u=['B','KB','MB','GB','TB','PB']; let i=0,n=Number(b); while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(n<10?2:n<100?1:0)+' '+u[i]; }
     function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',5000); }
+    function dtLocal(iso){ try{ return new Date(iso).toLocaleString(); }catch{ return iso; } }
 
     // ---- Global ----
     let sourceAvailable = false;
+    let lastPlan = null; // zapamiętany wynik /api/backup/plan
 
     // ---- Source status ----
     async function loadSource(){
@@ -144,9 +175,11 @@
     // ---- USB targets (backup) ----
     async function loadTargets(){
       const sel = document.getElementById('usb-target');
+      const filter = document.getElementById('hist-filter');
       sel.innerHTML = '';
       try{
         const t = await fetchJson('/api/backup/targets');
+        // wypełnij dropdown backupu
         if (t.length === 0){
           sel.disabled = true;
           const opt = document.createElement('option'); opt.value=''; opt.textContent='Brak zamontowanych dysków USB';
@@ -161,6 +194,17 @@
             sel.appendChild(opt);
           }
           showUsbBanner(true, t.length);
+        }
+
+        // filtr historii
+        filter.innerHTML = '';
+        const all = document.createElement('option'); all.value = ''; all.textContent = 'Wszystkie podłączone';
+        filter.appendChild(all);
+        for (const x of t){
+          const opt = document.createElement('option');
+          opt.value = x.mountPoint;
+          opt.textContent = x.mountPoint;
+          filter.appendChild(opt);
         }
       }catch(e){
         console.error(e);
@@ -180,26 +224,57 @@
       if (!sourceAvailable){ setPlan('Źródło /mnt/shared niedostępne'); return; }
       try{
         const p = await fetchJson('/api/backup/plan?targetMount=' + encodeURIComponent(mp));
-        setPlan(`${p.enoughSpace ? 'OK' : 'ZA MAŁO MIEJSCA'} — potrzeba ${human(p.estimatedBytes)}, wolne ${human(p.freeBytes)}. Katalog docelowy: ${p.targetBackupDir}`);
+        lastPlan = p;
+        const need = human(p.estimatedBytes), free = human(p.freeBytes);
+        setPlan(`${p.enoughSpace ? 'OK' : 'ZA MAŁO MIEJSCA'} — potrzeba ${need}, wolne ${free}. Katalog docelowy: ${p.targetBackupDir}`);
+        if (!p.enoughSpace){
+          showToast(`Za mało miejsca: potrzeba ${need}, wolne ${free}.`);
+        }
       }catch(e){
         setPlan('Błąd planowania: ' + e.message);
+        lastPlan = null;
       }
+      enforceButtons();
     }
+
     async function startBackup(){
       clearLog();
       const sel = document.getElementById('usb-target');
       const mp = sel.value;
       if (!mp){ setPlan('Wybierz cel USB'); return; }
       if (!sourceAvailable){ setPlan('Źródło /mnt/shared niedostępne'); return; }
+
+      // ZAWSZE sprawdź plan tuż przed startem (blokada na UI + backend)
+      try{
+        const p = await fetchJson('/api/backup/plan?targetMount=' + encodeURIComponent(mp));
+        lastPlan = p;
+        if (!p.enoughSpace){
+          const need = human(p.estimatedBytes), free = human(p.freeBytes);
+          setPlan(`ZA MAŁO MIEJSCA — potrzeba ${need}, wolne ${free}.`);
+          showToast(`Nie mogę wystartować: za mało miejsca (potrzeba ${need}, wolne ${free}).`);
+          enforceButtons();
+          return; // ⛔️ BLOKADA STARTU
+        }
+      }catch(e){
+        appendLog('Błąd planowania: ' + e.message);
+        return;
+      }
+
       try{
         const resp = await fetch('/api/backup/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targetMount: mp})});
-        if(!resp.ok){ appendLog(await resp.text()); return; }
+        if(!resp.ok){
+          const t = await resp.text();
+          appendLog(t);
+          showToast(t);
+          return;
+        }
         const { operationId } = await resp.json();
         appendLog(`[${new Date().toLocaleTimeString()}] Start backup (opId ${operationId})`);
       }catch(e){
         appendLog('Błąd uruchamiania: ' + e.message);
       }
     }
+
     function setPlan(msg){ document.getElementById('plan-info').textContent = msg; }
     function appendLog(line){ const el=document.getElementById('backup-log'); el.textContent += (line+"\n"); el.scrollTop=el.scrollHeight; }
     function clearLog(){ document.getElementById('backup-log').textContent=''; }
@@ -222,7 +297,7 @@
         tr.innerHTML = `
           <td>${d.path}</td>
           <td><span class="label">${d.type}</span></td>
-          <td><span class="label">${d.transport}</span></td>
+          <td><span class="label">${d.transport ?? '-'}</span></td>
           <td>${(d.vendor||'') + ' ' + (d.model||'')}</td>
           <td>${d.serial||''}</td>
           <td>${d.size||''}</td>
@@ -240,7 +315,7 @@
       if (usbDisks.length === 0){
         dot.classList.remove('ok'); dot.classList.add('bad');
         title.innerHTML = '<strong>Brak podłączonego dysku USB</strong>';
-        sub.textContent = 'Podłącz dysk, aby zobaczyć jego parametry.';
+        sub.textContent = 'Podłącz dysk, a potem kliknij „Odśwież”.';
         wrap.style.display = 'none'; wrap.innerHTML = ''; return;
       }
       dot.classList.remove('bad'); dot.classList.add('ok');
@@ -269,34 +344,81 @@
       if (present){ bad.style.display='none'; ok.style.display='flex'; cnt.textContent = `wykryto ${count}`; }
       else { ok.style.display='none'; bad.style.display='flex'; }
     }
+
+    // Start/Plan aktywne tylko, gdy: źródło OK + wybrany USB + (jeśli był plan i był negatywny → blokuj)
     function enforceButtons(){
       const sel = document.getElementById('usb-target');
       const btnPlan = document.getElementById('plan');
       const btnStart = document.getElementById('start');
       const hasUsb = sel && !sel.disabled && !!sel.value;
-      const enabled = !!(sourceAvailable && hasUsb);
-      btnPlan.disabled = !enabled;
-      btnStart.disabled = !enabled;
+      btnPlan.disabled = !(sourceAvailable && hasUsb);
+
+      const planOk = (lastPlan == null) ? true : !!lastPlan.enoughSpace;
+      btnStart.disabled = !(sourceAvailable && hasUsb && planOk);
+    }
+
+    // ---- Historia ----
+    async function loadHistory(){
+      const filter = document.getElementById('hist-filter');
+      const q = filter.value ? ('?targetMount=' + encodeURIComponent(filter.value)) : '';
+      const items = await fetchJson('/api/backup/history' + q);
+      renderHistory(items);
+    }
+    function renderHistory(items){
+      const tb = document.querySelector('#hist tbody'); tb.innerHTML='';
+      for (const it of items){
+        const tr = document.createElement('tr');
+        const pill = `<span class="pill ${it.success?'ok':'bad'}">${it.success?'OK':'Błąd'}</span>`;
+        const size = it.totalTransferredFileSize!=null ? human(it.totalTransferredFileSize) : '-';
+        const cnt  = it.numberOfTransferredFiles?.toString() ?? '-';
+        const sum  = it.summaryTxtPath || it.summaryJsonPath;
+        tr.innerHTML = `
+          <td>${dtLocal(it.startedAtUtc)}</td>
+          <td>${pill}</td>
+          <td>${size}</td>
+          <td>${cnt}</td>
+          <td>${fmtDuration(it.duration)}</td>
+          <td><code>${it.targetMount}</code></td>
+          <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><code title="${sum}">${sum}</code></td>
+        `;
+        tb.appendChild(tr);
+      }
+      if (items.length === 0){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="7" class="muted">Brak podsumowań na podłączonych dyskach.</td>`;
+        tb.appendChild(tr);
+      }
+    }
+    function fmtDuration(span){
+      if (typeof span === 'string'){
+        const parts = span.split(':'); if (parts.length>=2) return `${parts[0]}h ${parts[1]}m ${parts[2]?.split('.')[0]||'0'}s`;
+        return span;
+      }
+      return '-';
     }
 
     // ---- Events / init ----
     document.getElementById('plan').onclick = planBackup;
     document.getElementById('start').onclick = startBackup;
-    document.getElementById('refresh').onclick = ()=>{ loadAll(); loadTargets(); loadSource(); };
+    document.getElementById('refresh').onclick = ()=>{ lastPlan=null; setPlan(''); loadAll(); loadTargets(); loadSource(); loadHistory(); enforceButtons(); };
+    document.getElementById('hist-refresh').onclick = ()=> loadHistory();
+    document.getElementById('hist-filter').onchange = ()=> loadHistory();
 
-    loadAll(); loadTargets(); loadSource();
-    setInterval(()=>{ loadAll(); loadTargets(); loadSource(); }, 7000);
+    // Pierwsze załadowanie – bez automatycznych cyklicznych skanów
+    loadAll(); loadTargets(); loadSource(); loadHistory();
 
-    // SignalR: dyski (realtime)
+    // SignalR: tylko powiadomienia (BEZ auto-odświeżania)
     const conn = new signalR.HubConnectionBuilder().withUrl('/hubs/disks').withAutomaticReconnect().build();
-    conn.on('deviceAdded',  evt => { showToast(`Wykryto nowy dysk USB: ${evt.name}`);  loadAll(); loadTargets(); });
-    conn.on('deviceRemoved',evt => { showToast(`Odłączono urządzenie: ${evt.path}`); loadAll(); loadTargets(); });
+    conn.on('deviceAdded',  evt => { showToast(`Wykryto nowe urządzenie (USB?): ${evt.name}. Kliknij „Odśwież”.`); });
+    conn.on('deviceRemoved',evt => { showToast(`Odłączono urządzenie: ${evt.path}. Kliknij „Odśwież”.`); });
     conn.start().catch(err => console.error('SignalR error:', err));
 
-    // SignalR: backup log/status
     const bconn = new signalR.HubConnectionBuilder().withUrl('/hubs/backup').withAutomaticReconnect().build();
     bconn.on('backupLog', x => appendLog(x.line));
-    bconn.on('backupStatus', s => appendLog(`[${s.state}] ${s.message}`));
+    bconn.on('backupStatus', s => {
+      appendLog(`[${s.state}] ${s.message}`);
+      if (s.state === 'Completed' || s.state === 'Failed') { loadHistory(); }
+    });
     bconn.start().catch(err => console.error('Backup hub error:', err));
   </script>
 </body>
