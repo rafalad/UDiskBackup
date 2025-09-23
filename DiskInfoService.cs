@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace UDiskBackup;
 
@@ -7,73 +8,64 @@ public class DiskInfoService
 {
     public async Task<IReadOnlyList<DiskDevice>> GetDisksAsync()
     {
+        // 1) Główna ścieżka: lsblk z jawnie podanymi kolumnami (bez -O)
+        var cols = "NAME,TYPE,SIZE,ROTA,TRAN,VENDOR,MODEL,SERIAL,PATH,FSTYPE,MOUNTPOINT,MOUNTPOINTS";
+        var (exit, stdout, stderr) = await Run("lsblk", $"-J -b -o {cols}");
+        if (exit == 0 && !string.IsNullOrWhiteSpace(stdout))
+        {
+            var parsed = ParseLsblk(stdout);
+            if (parsed.Count > 0)
+                return await FixTransportsAsync(parsed); // udev/sysfs fallback dla USB
+        }
+
+        // 2) Plan B: lsblk minimalny (bez -o listy)
+        var (exit2, stdout2, _) = await Run("lsblk", "-J -b");
+        if (exit2 == 0 && !string.IsNullOrWhiteSpace(stdout2))
+        {
+            var parsed = ParseLsblk(stdout2);
+            if (parsed.Count > 0)
+                return await FixTransportsAsync(parsed);
+        }
+
+        // 3) Plan C: enumeracja po /sys/block (działa nawet bez lsblk)
+        var sysParsed = EnumerateFromSysfs();
+        return await FixTransportsAsync(sysParsed);
+    }
+
+    // ---------- Parsowanie JSON lsblk ----------
+
+    private static List<DiskDevice> ParseLsblk(string json)
+    {
         var result = new List<DiskDevice>();
-
-        // Minimalny zestaw kolumn, których używa UI
-        var cols = "NAME,TYPE,SIZE,ROTA,TRAN,VENDOR,MODEL,SERIAL,PATH,FSTYPE,MOUNTPOINT";
-        var (exit, stdout, stderr) = await Run("lsblk", $"-J -O -b -o {cols}");
-        if (exit != 0 || string.IsNullOrWhiteSpace(stdout))
-            return result;
-
-        using var doc = JsonDocument.Parse(stdout);
+        using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("blockdevices", out var arr) || arr.ValueKind != JsonValueKind.Array)
             return result;
 
         foreach (var node in arr.EnumerateArray())
         {
-            var type = GetString(node, "type");
-            if (type is not ("disk" or "rom"))
-                continue;
+            var type = GetString(node, "type")?.ToLowerInvariant();
+            if (type is not ("disk" or "rom")) continue;
 
-            var dev = BuildDisk(node);
-            if (dev != null)
-                result.Add(dev);
+            var dev = BuildFromNode(node);
+            if (dev != null) result.Add(dev);
         }
-
-        // Fallback: popraw "transport" na podstawie udevadm/sysfs,
-        // jeśli lsblk podał pusty/unknown (typowe dla JMicron).
-        for (int i = 0; i < result.Count; i++)
-        {
-            var d = result[i];
-            if (string.IsNullOrWhiteSpace(d.Transport) || d.Transport!.Equals("unknown", StringComparison.OrdinalIgnoreCase))
-            {
-                var name = System.IO.Path.GetFileName(d.Path);
-                var detected = await DetectTransportFallbackAsync(d.Path, name);
-                if (!string.IsNullOrWhiteSpace(detected))
-                {
-                    result[i] = d with { Transport = detected };
-                }
-                else if (name.StartsWith("nvme", StringComparison.OrdinalIgnoreCase))
-                {
-                    result[i] = d with { Transport = "nvme" };
-                }
-            }
-        }
-
         return result;
     }
 
-    // ---- helpers ----
-
-    private static DiskDevice? BuildDisk(JsonElement node)
+    private static DiskDevice? BuildFromNode(JsonElement node)
     {
         var name = GetString(node, "name");
         if (string.IsNullOrEmpty(name)) return null;
 
-        var path = GetString(node, "path");
-        if (string.IsNullOrEmpty(path))
-            path = "/dev/" + name;
-
+        var path = GetString(node, "path") ?? ("/dev/" + name);
         var sizeBytes = GetLong(node, "size");
         var sizeHuman = sizeBytes.HasValue ? Human(sizeBytes.Value) : null;
 
         var rotational = GetInt(node, "rota") == 1;
-
-        var tran = GetString(node, "tran"); // bywa null/unknown dla niektórych mostków USB
-
-        var vendor = GetString(node, "vendor");
-        var model  = GetString(node, "model");
-        var serial = GetString(node, "serial");
+        var tran = GetString(node, "tran");
+        var vendor = OrNull(GetString(node, "vendor"));
+        var model  = OrNull(GetString(node, "model"));
+        var serial = OrNull(GetString(node, "serial"));
 
         var parts = new List<Partition>();
         if (node.TryGetProperty("children", out var ch) && ch.ValueKind == JsonValueKind.Array)
@@ -81,109 +73,223 @@ public class DiskInfoService
             foreach (var p in ch.EnumerateArray())
             {
                 var pType = GetString(p, "type");
-                if (pType is not ("part" or "crypt" or "raid"))
-                    continue;
+                if (pType is not ("part" or "crypt" or "raid")) continue;
 
                 var pName = GetString(p, "name");
-                var pPath = GetString(p, "path");
-                if (string.IsNullOrEmpty(pPath))
-                    pPath = "/dev/" + pName;
+                var pPath = GetString(p, "path") ?? ("/dev/" + pName);
+                var pSize = GetLong(p, "size");
+                var pSizeHuman = pSize.HasValue ? Human(pSize.Value) : null;
 
-                var pSizeBytes = GetLong(p, "size");
-                var pSizeHuman = pSizeBytes.HasValue ? Human(pSizeBytes.Value) : null;
+                // mountpoint (pojedynczy) albo mountpoints (tablica)
+                var mp = GetString(p, "mountpoint");
+                if (string.IsNullOrWhiteSpace(mp) && p.TryGetProperty("mountpoints", out var mps) && mps.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var m in mps.EnumerateArray())
+                    {
+                        if (m.ValueKind == JsonValueKind.String) { mp = m.GetString(); break; }
+                    }
+                }
 
                 var fstype = GetString(p, "fstype");
-                var mp     = GetString(p, "mountpoint"); // lsblk zwraca 'mountpoint' lower-case
-
-                parts.Add(new Partition(
-                    Path: pPath!,
-                    FsType: fstype,
-                    MountPoint: string.IsNullOrWhiteSpace(mp) ? null : mp,
-                    Size: pSizeHuman
-                ));
+                parts.Add(new Partition(pPath!, fstype, string.IsNullOrWhiteSpace(mp) ? null : mp, pSizeHuman));
             }
         }
 
         return new DiskDevice(
-            Path: path!,
+            Path: path,
             Type: GetString(node, "type") ?? "disk",
             Transport: string.IsNullOrWhiteSpace(tran) ? null : tran,
-            Vendor: string.IsNullOrWhiteSpace(vendor) ? null : vendor,
-            Model: string.IsNullOrWhiteSpace(model) ? null : model,
-            Serial: string.IsNullOrWhiteSpace(serial) ? null : serial,
+            Vendor: vendor,
+            Model: model,
+            Serial: serial,
             Size: sizeHuman,
             Rotational: rotational,
             Partitions: parts
         );
     }
 
-    private static async Task<string?> DetectTransportFallbackAsync(string devPath, string devName)
+    // ---------- Fallback /sys/block ----------
+
+    private static List<DiskDevice> EnumerateFromSysfs()
     {
-        // 1) udevadm properties -> ID_BUS=usb (najpewniejsze)
-        var (e1, props, _) = await Run("udevadm", $"info -q property -n {devPath}");
-        if (e1 == 0 && !string.IsNullOrWhiteSpace(props))
+        var res = new List<DiskDevice>();
+        var sysBlock = "/sys/block";
+        if (!Directory.Exists(sysBlock)) return res;
+
+        // mapa mountów z /proc/self/mounts
+        var mounts = ReadMounts();
+
+        foreach (var devDir in Directory.EnumerateDirectories(sysBlock))
         {
-            foreach (var line in props.Split('\n'))
+            var name = Path.GetFileName(devDir);
+            // akceptowane klasy urządzeń
+            if (!Regex.IsMatch(name, @"^(sd[a-z]+|nvme\d+n\d+|vd[a-z]+|hd[a-z]+|mmcblk\d+)$")) continue;
+
+            string devPath = "/dev/" + name;
+            long? bytes = ReadLongFile(Path.Combine(devDir, "size")).GetValueOrDefault() * 512L;
+            var rotational = (ReadLongFile(Path.Combine(devDir, "queue", "rotational")) ?? 0) == 1;
+
+            string? vendor = ReadString(Path.Combine(devDir, "device", "vendor"));
+            string? model  = ReadString(Path.Combine(devDir, "device", "model"));
+            string? serial = ReadString(Path.Combine(devDir, "device", "serial"));
+
+            // transport: nvme po nazwie, usb po ścieżce sysfs
+            string? transport = null;
+            if (name.StartsWith("nvme", StringComparison.OrdinalIgnoreCase)) transport = "nvme";
+            var real = TryReadLink(devDir);
+            if (!string.IsNullOrEmpty(real) && real!.Contains("/usb", StringComparison.OrdinalIgnoreCase)) transport = "usb";
+
+            // partycje: katalogi zaczynające się od nazwy urządzenia (np. sda1, sda2…)
+            var parts = new List<Partition>();
+            foreach (var child in Directory.EnumerateFileSystemEntries(devDir))
             {
-                var ln = line.Trim();
-                if (ln.StartsWith("ID_BUS=", StringComparison.OrdinalIgnoreCase))
-                {
-                    var bus = ln.Substring("ID_BUS=".Length).Trim().ToLowerInvariant();
-                    if (bus == "usb") return "usb";
-                }
-                if (ln.StartsWith("ID_USB_DRIVER=", StringComparison.OrdinalIgnoreCase))
-                {
-                    // np. usb-storage
-                    return "usb";
-                }
+                var bn = Path.GetFileName(child);
+                if (!bn.StartsWith(name, StringComparison.Ordinal)) continue; // np. sda1
+                if (!Regex.IsMatch(bn, @"^\w+\d+$")) continue;
+
+                var pPath = "/dev/" + bn;
+                long? pBytes = ReadLongFile(Path.Combine("/sys/class/block", bn, "size")).GetValueOrDefault() * 512L;
+                var mp = mounts.TryGetValue(pPath, out var m) ? m.mountPoint : null;
+                var fs = mounts.TryGetValue(pPath, out var m2) ? m2.fstype : null;
+
+                parts.Add(new Partition(
+                    Path: pPath,
+                    FsType: fs,
+                    MountPoint: mp,
+                    Size: pBytes.HasValue ? Human(pBytes.Value) : null
+                ));
+            }
+
+            res.Add(new DiskDevice(
+                Path: devPath,
+                Type: "disk",
+                Transport: transport,
+                Vendor: OrNull(vendor),
+                Model: OrNull(model),
+                Serial: OrNull(serial),
+                Size: bytes.HasValue ? Human(bytes.Value) : null,
+                Rotational: rotational,
+                Partitions: parts
+            ));
+        }
+
+        return res;
+    }
+
+    private static Dictionary<string,(string mountPoint,string fstype)> ReadMounts()
+    {
+        var dict = new Dictionary<string,(string,string)>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/mounts"))
+            {
+                // format: <src> <dst> <type> ...
+                var parts = line.Split(' ', 4, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 3) continue;
+                var src = parts[0]; var dst = parts[1]; var type = parts[2];
+                if (!src.StartsWith("/dev/")) continue;
+                dict[src] = (dst, type);
             }
         }
-
-        // 2) udevadm path -> ścieżka sysfs zawiera /usb/
-        var (e2, sysPath, _) = await Run("udevadm", $"info -q path -n {devPath}");
-        if (e2 == 0 && sysPath.Contains("/usb", StringComparison.OrdinalIgnoreCase))
-            return "usb";
-
-        // 3) heurystyka po nazwie (NVMe już wyłapujemy wyżej)
-        if (devName.StartsWith("sd", StringComparison.OrdinalIgnoreCase))
-        {
-            // Bezpiecznie zwróć null zamiast 'unknown' – UI pokaże „-”,
-            // a jeżeli to faktycznie USB, zwykle pkt 1-2 to wykryją.
-            return null;
-        }
-
-        return null;
+        catch { /* ignore */ }
+        return dict;
     }
+
+    // ---------- Transport fix (udevadm/sysfs) ----------
+
+    private static async Task<IReadOnlyList<DiskDevice>> FixTransportsAsync(List<DiskDevice> list)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            var d = list[i];
+            if (!string.IsNullOrWhiteSpace(d.Transport) && !d.Transport.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var name = Path.GetFileName(d.Path);
+            // 1) udevadm properties
+            var (e1, props, _) = await Run("udevadm", $"info -q property -n {d.Path}");
+            if (e1 == 0 && !string.IsNullOrWhiteSpace(props))
+            {
+                foreach (var ln in props.Split('\n'))
+                {
+                    var t = ln.Trim();
+                    if (t.StartsWith("ID_BUS=usb", StringComparison.OrdinalIgnoreCase) ||
+                        t.StartsWith("ID_USB_DRIVER=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        list[i] = d with { Transport = "usb" };
+                        goto Next;
+                    }
+                }
+            }
+
+            // 2) sysfs path zawiera /usb/
+            var (e2, sysPath, _) = await Run("udevadm", $"info -q path -n {d.Path}");
+            if (e2 == 0 && sysPath.Contains("/usb", StringComparison.OrdinalIgnoreCase))
+            {
+                list[i] = d with { Transport = "usb" };
+                goto Next;
+            }
+
+            // 3) heurystyki
+            if (name.StartsWith("nvme", StringComparison.OrdinalIgnoreCase))
+                list[i] = d with { Transport = "nvme" };
+
+        Next: ;
+        }
+        return list;
+    }
+
+    // ---------- Utils ----------
 
     private static string? GetString(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String ? v.GetString() : null;
-
     private static int? GetInt(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.Number ? v.GetInt32() : null;
-
     private static long? GetLong(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.Number ? v.GetInt64() : null;
 
     private static string Human(long bytes)
     {
         string[] u = ["B","KB","MB","GB","TB","PB"];
-        var n = (double)bytes; var i = 0;
+        double n = bytes; int i = 0;
         while (n >= 1024 && i < u.Length - 1) { n /= 1024; i++; }
         return n < 10 ? $"{n:0.##} {u[i]}" : n < 100 ? $"{n:0.#} {u[i]}" : $"{n:0} {u[i]}";
     }
 
+    private static string? OrNull(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    private static long? ReadLongFile(string path)
+    {
+        try { var t = File.ReadAllText(path).Trim(); return long.Parse(t); } catch { return null; }
+    }
+    private static string? ReadString(string path)
+    {
+        try { return File.ReadAllText(path).Trim(); } catch { return null; }
+    }
+    private static string? TryReadLink(string path)
+    {
+        try { return Path.GetFullPath(path); } catch { return null; }
+    }
+
     private static async Task<(int exit, string stdout, string stderr)> Run(string file, string args)
     {
-        var psi = new ProcessStartInfo(file, args)
+        try
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            UseShellExecute = false
-        };
-        using var p = Process.Start(psi)!;
-        var so = await p.StandardOutput.ReadToEndAsync();
-        var se = await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return (p.ExitCode, so, se);
+            var psi = new ProcessStartInfo(file, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute = false
+            };
+            using var p = Process.Start(psi)!;
+            var so = await p.StandardOutput.ReadToEndAsync();
+            var se = await p.StandardError.ReadToEndAsync();
+            await p.WaitForExitAsync();
+            return (p.ExitCode, so, se);
+        }
+        catch (Exception ex)
+        {
+            return (-1, "", ex.Message);
+        }
     }
 }
