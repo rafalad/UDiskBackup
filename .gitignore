@@ -1,0 +1,19 @@
+## .NET / VSCode / build
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/
+.vs/
+# logs/temp
+*.log
+*.ds_store
+.DS_Store
+# publish / containers
+out/
+*.binlog
+# node (gdyby kiedyś doszły narzędzia frontowe)
+node_modules/
+dist/
