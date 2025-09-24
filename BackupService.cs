@@ -15,6 +15,7 @@ public class BackupService
     private readonly IHubContext<BackupHub> _hub;
     private readonly object _lock = new();
     private bool _busy;
+    private volatile string? _currentLogFile;
 
     public BackupService(DiskInfoService disks, IHubContext<BackupHub> hub)
     {
@@ -35,16 +36,19 @@ public class BackupService
                 try
                 {
                     var di = new DriveInfo(p.MountPoint!);
+                    if (di.TotalSize <= 0) continue;
+                    var mpName = Path.GetFileName(p.MountPoint!.TrimEnd('/'));
+                    if (!string.Equals(mpName, "USB_BACKUP", StringComparison.OrdinalIgnoreCase)) continue;
                     targets.Add(new UsbTarget(
                         MountPoint: p.MountPoint!,
                         Device: p.Path,
-                        Label: Path.GetFileName(p.MountPoint!.TrimEnd('/')),
+                        Label: mpName,
                         FsType: p.FsType ?? "",
                         FreeBytes: di.AvailableFreeSpace,
                         TotalBytes: di.TotalSize
                     ));
                 }
-                catch { /* pomiń problemy z DriveInfo */ }
+                catch { }
             }
         }
         return targets;
@@ -70,13 +74,8 @@ public class BackupService
         return new BackupPlan(source, dest, deleted, args, estimated, free, enough);
     }
 
-    /// <summary>
-    /// Startuje backup w tle. Zwraca operationId; logi lecą przez SignalR.
-    /// Po zakończeniu tworzy pliki podsumowania na dysku USB (JSON + TXT).
-    /// </summary>
     public Task<string> StartAsync(string targetMount, string source = "/mnt/shared")
     {
-        // Walidacja celu
         if (string.IsNullOrWhiteSpace(targetMount) || !targetMount.StartsWith('/'))
             throw new ArgumentException("Niepoprawny mountpoint.");
         if (!Directory.Exists(targetMount))
@@ -106,6 +105,13 @@ public class BackupService
             long? freeBefore = null;
             try { freeBefore = new DriveInfo(targetMount).AvailableFreeSpace; } catch { }
 
+            var plan = PlanAsync(targetMount, source).GetAwaiter().GetResult();
+            if (!plan.EnoughSpace)
+            {
+                lock (_lock) { _busy = false; }
+                throw new InvalidOperationException($"Za mało miejsca. Potrzeba {plan.EstimatedBytes} B, wolne {plan.FreeBytes} B.");
+            }
+
             var args = RsyncArgs(source, dest, deleted, dryRun: false);
             var opId = Guid.NewGuid().ToString("N");
 
@@ -113,6 +119,9 @@ public class BackupService
             {
                 await _hub.Clients.All.SendAsync("backupStatus", new BackupStatus(opId, "Running", "Backup rozpoczęty"));
                 var allOutput = new StringBuilder(64 * 1024);
+
+                var currentLog = Path.Combine(logsDir, $"current-{opId}.log");
+                _currentLogFile = currentLog;
 
                 try
                 {
@@ -130,7 +139,8 @@ public class BackupService
                         if (e.Data != null)
                         {
                             allOutput.AppendLine(e.Data);
-                            await _hub.Clients.All.SendAsync("backupLog", new { operationId = opId, line = e.Data });
+                            AppendToFileSafe(currentLog, e.Data);
+                            await EmitLog(opId, Classify(e.Data), e.Data);
                         }
                     };
                     p.ErrorDataReceived += async (_, e) =>
@@ -138,7 +148,8 @@ public class BackupService
                         if (e.Data != null)
                         {
                             allOutput.AppendLine(e.Data);
-                            await _hub.Clients.All.SendAsync("backupLog", new { operationId = opId, line = e.Data });
+                            AppendToFileSafe(currentLog, e.Data);
+                            await EmitLog(opId, Classify(e.Data, err:true), e.Data);
                         }
                     };
 
@@ -185,6 +196,17 @@ public class BackupService
                     await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
                     await File.WriteAllTextAsync(txtPath, MakeHumanSummary(summary));
 
+                    try
+                    {
+                        if (File.Exists(currentLog))
+                        {
+                            var finalLog = Path.Combine(logsDir, $"{opId}.log");
+                            File.Move(currentLog, finalLog, true);
+                            _currentLogFile = finalLog;
+                        }
+                    }
+                    catch { }
+
                     if (p.ExitCode == 0)
                         await _hub.Clients.All.SendAsync("backupStatus", new BackupStatus(opId, "Completed", $"Backup zakończony. Podsumowanie: {txtPath}"));
                     else
@@ -209,10 +231,6 @@ public class BackupService
         }
     }
 
-    /// <summary>
-    /// Zwraca listę podsumowań backupów z katalogów logs na podłączonych USB.
-    /// Jeśli podasz targetMount – tylko z tego mountpointu. Sortowane malejąco po dacie startu.
-    /// </summary>
     public async Task<IReadOnlyList<BackupHistoryItem>> GetHistoryAsync(string? targetMount = null, int take = 50)
     {
         var items = new List<BackupHistoryItem>();
@@ -220,7 +238,6 @@ public class BackupService
 
         if (!string.IsNullOrWhiteSpace(targetMount))
         {
-            // Gdy wskazano mountpoint ręcznie (nawet jeśli akurat nie jest USB wg detekcji)
             targets.Add(new UsbTarget(targetMount, Device: "", Label: Path.GetFileName(targetMount.TrimEnd('/')), FsType: "", FreeBytes: 0, TotalBytes: 0));
         }
         else
@@ -256,10 +273,7 @@ public class BackupService
                         TotalTransferredFileSize: summary.TotalTransferredFileSize
                     ));
                 }
-                catch
-                {
-                    // Pomijamy uszkodzone pliki
-                }
+                catch { }
             }
         }
 
@@ -269,7 +283,16 @@ public class BackupService
             .ToList();
     }
 
-    // ----------------- Helpers -----------------
+    public IResult CurrentLog(bool download = false)
+    {
+        var path = _currentLogFile;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            return Results.Text("");
+        if (download)
+            return Results.File(path, "text/plain", Path.GetFileName(path));
+        var text = File.ReadAllText(path);
+        return Results.Text(text, "text/plain");
+    }
 
     private static string RsyncArgs(string source, string dest, string deleted, bool dryRun)
     {
@@ -384,6 +407,22 @@ public class BackupService
         return n < 10 ? $"{n:0.##} {u[i]}" : n < 100 ? $"{n:0.#} {u[i]}" : $"{n:0} {u[i]}";
     }
 
+    private static string Classify(string line, bool err = false)
+    {
+        if (Regex.IsMatch(line, @"error|failed|IO error|rsync\s+error", RegexOptions.IgnoreCase)) return "error";
+        if (Regex.IsMatch(line, @"\d+%|\bto-check=\d+/\d+\b|xfer", RegexOptions.IgnoreCase)) return "progress";
+        if (err) return "progress";
+        return "info";
+    }
+
+    private Task EmitLog(string opId, string level, string line)
+        => _hub.Clients.All.SendAsync("backupLog", new { operationId = opId, level, line, ts = DateTimeOffset.UtcNow });
+
+    private static void AppendToFileSafe(string path, string line)
+    {
+        try { File.AppendAllText(path, line + Environment.NewLine); } catch { }
+    }
+
     private class ParsedRsyncStats
     {
         public int? NumberOfFiles { get; set; }
@@ -436,5 +475,30 @@ public class BackupService
         string? SummaryTxtPath,
         int? NumberOfTransferredFiles,
         long? TotalTransferredFileSize
+    );
+
+    public record UsbTarget(
+        string MountPoint,
+        string Device,
+        string Label,
+        string FsType,
+        long FreeBytes,
+        long TotalBytes
+    );
+
+    public record BackupPlan(
+        string SourceDir,
+        string TargetBackupDir,
+        string DeletedDir,
+        string RsyncArgs,
+        long EstimatedBytes,
+        long FreeBytes,
+        bool EnoughSpace
+    );
+
+    public record BackupStatus(
+        string OperationId,
+        string State,
+        string Message
     );
 }

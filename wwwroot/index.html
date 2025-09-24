@@ -4,35 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>UDiskBackup</title>
-  <style>
-    :root{--ok:#16a34a;--bad:#dc2626;--muted:#6b7280;--bg:#f8fafc;--card:#ffffff;--bd:#e5e7eb}
-    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:2rem;background:var(--bg);color:#111}
-    h1{margin-top:0}
-    .row{display:grid;grid-template-columns:1fr;gap:1rem}
-    @media(min-width:1100px){.row{grid-template-columns: 1fr 2fr}}
-    .panel{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1rem;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-    .status{display:flex;align-items:center;gap:.75rem}
-    .dot{width:.75rem;height:.75rem;border-radius:50%}
-    .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
-    .muted{color:var(--muted)}
-    .usb-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem;margin-top:.75rem}
-    .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1rem}
-    .label{display:inline-block;font-size:.75rem;color:#111;background:#eef2ff;border:1px solid #c7d2fe;border-radius:999px;padding:.15rem .45rem;margin-right:.25rem}
-    table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
-    th,td{border-bottom:1px solid var(--bd);padding:.6rem .7rem;vertical-align:top}
-    th{background:#f6f7fb;text-align:left}
-    .actions{display:flex;gap:.5rem;align-items:center}
-    .btn{border:1px solid var(--bd);background:#fff;border-radius:10px;padding:.45rem .7rem;cursor:pointer}
-    .btn[disabled]{cursor:not-allowed;opacity:.6}
-    .toast{position:fixed;right:1rem;bottom:1rem;background:#111;color:#fff;padding:.65rem .9rem;border-radius:.5rem;display:none}
-    pre{white-space:pre-wrap;word-break:break-word}
-    .banner{border:1px solid var(--bd);border-left-width:6px;border-radius:10px;padding:.65rem .8rem;margin:0 0 1rem 0;display:flex;gap:.6rem;align-items:center}
-    .banner.bad{background:#fee2e2;border-left-color:#ef4444}
-    .banner.ok{background:#dcfce7;border-left-color:#22c55e}
-    .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid var(--bd);font-size:.78rem}
-    .pill.ok{background:#dcfce7} .pill.bad{background:#fee2e2}
-    code{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:.05rem .3rem}
-  </style>
+  <link rel="stylesheet" href="/app.css"/>
 </head>
 <body>
   <h1>UDiskBackup</h1>
@@ -50,24 +22,35 @@
 
   <!-- BANER USB -->
   <div id="usb-banner" class="banner bad" style="display:none">
-    <strong>Brak zamontowanego dysku USB.</strong>
-    <span class="muted">Podłącz dysk USB, a następnie kliknij „Odśwież”.</span>
+    <strong>Brak kwalifikującego się dysku USB.</strong>
+    <span class="muted">Wymagany label <code>USB_BACKUP</code> i rozmiar &gt; 0 B. Podłącz dysk i kliknij „Odśwież”.</span>
   </div>
   <div id="usb-banner-ok" class="banner ok" style="display:none">
-    <strong>Wykryto dysk(i) USB:</strong>
+    <strong>Wykryto dysk(i) USB (USB_BACKUP):</strong>
     <span id="usb-banner-count" class="muted"></span>
   </div>
 
   <!-- PANEL BACKUPU -->
   <div class="panel" style="margin-bottom:1rem">
-    <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center">
+    <div class="actions">
       <strong>Backup do USB</strong>
       <select id="usb-target" class="btn" style="min-width:280px"></select>
       <button class="btn" id="plan">Sprawdź miejsce</button>
       <button class="btn" id="start">Start backup</button>
       <span class="muted" id="plan-info"></span>
     </div>
-    <pre id="backup-log" style="margin-top:.75rem;max-height:260px;overflow:auto;background:#0b1020;color:#e6edf3;padding:.75rem;border-radius:10px;border:1px solid #1f2937"></pre>
+
+    <!-- Live podgląd -->
+    <div class="log-toolbar">
+      <strong>Live podgląd:</strong>
+      <label><input type="checkbox" id="flt-info" checked> INFO</label>
+      <label><input type="checkbox" id="flt-progress" checked> PROGRESS</label>
+      <label><input type="checkbox" id="flt-error" checked> ERROR</label>
+      <label><input type="checkbox" id="autoscroll" checked> Autoscroll</label>
+      <button class="btn" id="clear-log">Wyczyść</button>
+      <a class="btn" id="download-current" href="/api/backup/current-log?download=1">Pobierz bieżący log</a>
+    </div>
+    <div id="backup-log" class="logview"></div>
   </div>
 
   <div class="row">
@@ -82,10 +65,9 @@
         <div id="usb-dot" class="dot bad"></div>
         <div>
           <div id="usb-title"><strong>Brak podłączonego dysku USB</strong></div>
-          <div class="muted" id="usb-sub">Podłącz dysk, a potem kliknij „Odśwież”.</div>
+          <div class="muted" id="usb-sub">Wymagany label <code>USB_BACKUP</code> na partycji i rozmiar &gt; 0 B.</div>
         </div>
       </div>
-
       <div id="usb-cards" class="usb-cards" style="display:none"></div>
     </div>
 
@@ -95,10 +77,19 @@
         <div><strong>Wszystkie dyski</strong></div>
       </div>
       <table id="grid">
-        <thead><tr>
-          <th>Urządzenie</th><th>Rodzaj</th><th>Transport</th><th>Vendor / Model</th>
-          <th>Serial</th><th>Rozmiar</th><th>Rotational</th><th>Partycje</th>
-        </tr></thead>
+        <thead>
+          <tr>
+            <th>Urządzenie</th>
+            <th>Rodzaj</th>
+            <th>Transport</th>
+            <th>Vendor / Model</th>
+            <th>Serial</th>
+            <th>Rozmiar</th>
+            <th>Rotational</th>
+            <th>Etykieta</th>
+            <th>Partycje</th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>
@@ -106,9 +97,9 @@
 
   <!-- HISTORIA BACKUPÓW -->
   <div class="panel" style="margin-top:1rem">
-    <div class="actions" style="justify-content:space-between;flex-wrap:wrap">
+    <div class="actions" style="justify-content:space-between">
       <div><strong>Historia backupów</strong></div>
-      <div style="display:flex;gap:.5rem;align-items:center">
+      <div class="actions">
         <label class="muted">Filtr (mount):</label>
         <select id="hist-filter" class="btn" style="min-width:220px"></select>
         <button class="btn" id="hist-refresh">Odśwież</button>
@@ -132,7 +123,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <!-- SignalR client z CDN -->
   <script src="https://unpkg.com/@microsoft/signalr@8.0.5/dist/browser/signalr.min.js"></script>
   <script>
     // ---- Helpers ----
@@ -143,7 +133,7 @@
 
     // ---- Global ----
     let sourceAvailable = false;
-    let lastPlan = null; // zapamiętany wynik /api/backup/plan
+    let lastPlan = null;
 
     // ---- Source status ----
     async function loadSource(){
@@ -152,8 +142,7 @@
         sourceAvailable = !!(s.exists && s.readable);
         showSourceBanner(s);
       }catch(e){
-        console.error(e);
-        sourceAvailable = false;
+        console.error(e); sourceAvailable = false;
         showSourceBanner({path:'/mnt/shared', exists:false, readable:false, usedBytes:null});
       }
       enforceButtons();
@@ -167,9 +156,7 @@
         bad.style.display='none'; ok.style.display='flex';
         p.textContent = s.path || '/mnt/shared';
         sz.textContent = s.usedBytes!=null ? `— zajętość ~ ${human(s.usedBytes)}` : '';
-      } else {
-        ok.style.display='none'; bad.style.display='flex';
-      }
+      } else { ok.style.display='none'; bad.style.display='flex'; }
     }
 
     // ---- USB targets (backup) ----
@@ -179,10 +166,9 @@
       sel.innerHTML = '';
       try{
         const t = await fetchJson('/api/backup/targets');
-        // wypełnij dropdown backupu
         if (t.length === 0){
           sel.disabled = true;
-          const opt = document.createElement('option'); opt.value=''; opt.textContent='Brak zamontowanych dysków USB';
+          const opt = document.createElement('option'); opt.value=''; opt.textContent='Brak kwalifikujących się dysków USB';
           sel.appendChild(opt);
           showUsbBanner(false, 0);
         } else {
@@ -227,13 +213,8 @@
         lastPlan = p;
         const need = human(p.estimatedBytes), free = human(p.freeBytes);
         setPlan(`${p.enoughSpace ? 'OK' : 'ZA MAŁO MIEJSCA'} — potrzeba ${need}, wolne ${free}. Katalog docelowy: ${p.targetBackupDir}`);
-        if (!p.enoughSpace){
-          showToast(`Za mało miejsca: potrzeba ${need}, wolne ${free}.`);
-        }
-      }catch(e){
-        setPlan('Błąd planowania: ' + e.message);
-        lastPlan = null;
-      }
+        if (!p.enoughSpace){ showToast(`Za mało miejsca: potrzeba ${need}, wolne ${free}.`); }
+      }catch(e){ setPlan('Błąd planowania: ' + e.message); lastPlan = null; }
       enforceButtons();
     }
 
@@ -244,7 +225,7 @@
       if (!mp){ setPlan('Wybierz cel USB'); return; }
       if (!sourceAvailable){ setPlan('Źródło /mnt/shared niedostępne'); return; }
 
-      // ZAWSZE sprawdź plan tuż przed startem (blokada na UI + backend)
+      // ZAWSZE sprawdź plan tuż przed startem
       try{
         const p = await fetchJson('/api/backup/plan?targetMount=' + encodeURIComponent(mp));
         lastPlan = p;
@@ -252,32 +233,68 @@
           const need = human(p.estimatedBytes), free = human(p.freeBytes);
           setPlan(`ZA MAŁO MIEJSCA — potrzeba ${need}, wolne ${free}.`);
           showToast(`Nie mogę wystartować: za mało miejsca (potrzeba ${need}, wolne ${free}).`);
-          enforceButtons();
-          return; // ⛔️ BLOKADA STARTU
+          enforceButtons(); return;
         }
-      }catch(e){
-        appendLog('Błąd planowania: ' + e.message);
-        return;
-      }
+      }catch(e){ appendLog('error','Błąd planowania: ' + e.message); return; }
 
       try{
         const resp = await fetch('/api/backup/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targetMount: mp})});
-        if(!resp.ok){
-          const t = await resp.text();
-          appendLog(t);
-          showToast(t);
-          return;
-        }
+        if(!resp.ok){ const t = await resp.text(); appendLog('error', t); showToast(t); return; }
         const { operationId } = await resp.json();
-        appendLog(`[${new Date().toLocaleTimeString()}] Start backup (opId ${operationId})`);
-      }catch(e){
-        appendLog('Błąd uruchamiania: ' + e.message);
-      }
+        appendLog('info', `[${new Date().toLocaleTimeString()}] Start backup (opId ${operationId})`);
+        // po starcie dociągnij ogon bieżącego logu (gdyby stracone wydarzenia)
+        fetchCurrentLog();
+      }catch(e){ appendLog('error','Błąd uruchamiania: ' + e.message); }
     }
 
     function setPlan(msg){ document.getElementById('plan-info').textContent = msg; }
-    function appendLog(line){ const el=document.getElementById('backup-log'); el.textContent += (line+"\n"); el.scrollTop=el.scrollHeight; }
-    function clearLog(){ document.getElementById('backup-log').textContent=''; }
+
+    // ---- Live log UI ----
+    function lineVisible(level){
+      if(level==='error') return document.getElementById('flt-error').checked;
+      if(level==='progress') return document.getElementById('flt-progress').checked;
+      return document.getElementById('flt-info').checked;
+    }
+    function appendLog(level, text, ts){
+      const wrap = document.getElementById('backup-log');
+      const div = document.createElement('div');
+      div.className = `logline ${level}`;
+      const time = ts ? new Date(ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+      div.innerHTML = `<span class="ts">${time}</span><span class="msg"></span>`;
+      div.querySelector('.msg').textContent = text;
+      div.style.display = lineVisible(level) ? '' : 'none';
+      wrap.appendChild(div);
+      if (document.getElementById('autoscroll').checked){ wrap.scrollTop = wrap.scrollHeight; }
+    }
+    function clearLog(){ document.getElementById('backup-log').innerHTML=''; }
+    function applyFilters(){
+      const wrap = document.getElementById('backup-log');
+      for (const el of wrap.querySelectorAll('.logline')){
+        const classes = el.className.split(/\s+/);
+        const level = classes.find(c => ['info','progress','error','warn'].includes(c)) || 'info';
+        el.style.display = lineVisible(level) ? '' : 'none';
+      }
+    }
+    async function fetchCurrentLog(){
+      try{
+        const r = await fetch('/api/backup/current-log');
+        if(!r.ok) return;
+        const text = await r.text();
+        for (const ln of text.split('\n')){
+          if(!ln.trim()) continue;
+          // heurystyka poziomu
+          let lvl = 'info';
+          if (/ERROR|rsync error|failed/i.test(ln)) lvl='error';
+          else if (/%\s+/.test(ln) || /to-check=\d+\/\d+/.test(ln)) lvl='progress';
+          appendLog(lvl, ln);
+        }
+      }catch{}
+    }
+
+    document.getElementById('clear-log').onclick = clearLog;
+    document.getElementById('flt-info').onchange = applyFilters;
+    document.getElementById('flt-progress').onchange = applyFilters;
+    document.getElementById('flt-error').onchange = applyFilters;
 
     // ---- Disks view ----
     async function loadAll(){
@@ -293,7 +310,13 @@
       const tb = document.querySelector('#grid tbody'); tb.innerHTML='';
       for (const d of data){
         const tr = document.createElement('tr');
-        const parts = (d.partitions||[]).map(p => `${p.path} (${p.fstype ?? '-'}, ${p.size}, ${p.mountPoint ?? '-'})`).join('<br/>');
+        const diskLabel = (d.partitions||[]).map(p => p.label).find(x => !!x) || '';
+        const parts = (d.partitions||[]).map(p => {
+          const f = p.fstype ?? '-';
+          const m = p.mountPoint ?? '-';
+          const lab = p.label ? `, label: ${p.label}` : '';
+          return `${p.path} (${f}, ${p.size}, ${m}${lab})`;
+        }).join('<br/>');
         tr.innerHTML = `
           <td>${d.path}</td>
           <td><span class="label">${d.type}</span></td>
@@ -302,6 +325,7 @@
           <td>${d.serial||''}</td>
           <td>${d.size||''}</td>
           <td>${d.rotational}</td>
+          <td>${diskLabel || '-'}</td>
           <td>${parts||''}</td>`;
         tb.appendChild(tr);
       }
@@ -315,7 +339,7 @@
       if (usbDisks.length === 0){
         dot.classList.remove('ok'); dot.classList.add('bad');
         title.innerHTML = '<strong>Brak podłączonego dysku USB</strong>';
-        sub.textContent = 'Podłącz dysk, a potem kliknij „Odśwież”.';
+        sub.textContent = 'Wymagany label USB_BACKUP i rozmiar > 0 B. Podłącz dysk, a potem kliknij „Odśwież”.';
         wrap.style.display = 'none'; wrap.innerHTML = ''; return;
       }
       dot.classList.remove('bad'); dot.classList.add('ok');
@@ -323,7 +347,11 @@
       sub.textContent = 'Parametry podłączonych urządzeń:';
       wrap.style.display = 'grid'; wrap.innerHTML = '';
       for (const d of usbDisks){
-        const parts = (d.partitions||[]).map(p => `${p.path} (${p.fstype ?? '-'}, ${p.size}, ${p.mountPoint ?? '-'})`).join('<br/>') || '<span class="muted">brak partycji</span>';
+        const firstLabel = (d.partitions||[]).map(p => p.label).find(x => !!x) || '-';
+        const parts = (d.partitions||[]).map(p => {
+          const lab = p.label ? `, label: ${p.label}` : '';
+          return `${p.path} (${p.fstype ?? '-'}, ${p.size}, ${p.mountPoint ?? '-'}${lab})`;
+        }).join('<br/>') || '<span class="muted">brak partycji</span>';
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
@@ -332,7 +360,8 @@
             <div><span class="label">USB</span><span class="label">${(d.type||'').toUpperCase()}</span></div>
           </div>
           <div class="muted" style="margin-bottom:.35rem">${d.path}</div>
-          <div><strong>Rozmiar:</strong> ${d.size || '-'} &nbsp;&nbsp; <strong>Serial:</strong> ${d.serial || '-'}</div>
+          <div><strong>Etykieta:</strong> ${firstLabel} &nbsp;&nbsp; <strong>Serial:</strong> ${d.serial || '-'}</div>
+          <div><strong>Rozmiar:</strong> ${d.size || '-'}</div>
           <div style="margin-top:.5rem"><strong>Partycje:</strong><br/>${parts}</div>`;
         wrap.appendChild(card);
       }
@@ -345,14 +374,12 @@
       else { ok.style.display='none'; bad.style.display='flex'; }
     }
 
-    // Start/Plan aktywne tylko, gdy: źródło OK + wybrany USB + (jeśli był plan i był negatywny → blokuj)
     function enforceButtons(){
       const sel = document.getElementById('usb-target');
       const btnPlan = document.getElementById('plan');
       const btnStart = document.getElementById('start');
       const hasUsb = sel && !sel.disabled && !!sel.value;
       btnPlan.disabled = !(sourceAvailable && hasUsb);
-
       const planOk = (lastPlan == null) ? true : !!lastPlan.enoughSpace;
       btnStart.disabled = !(sourceAvailable && hasUsb && planOk);
     }
@@ -404,22 +431,29 @@
     document.getElementById('hist-refresh').onclick = ()=> loadHistory();
     document.getElementById('hist-filter').onchange = ()=> loadHistory();
 
-    // Pierwsze załadowanie – bez automatycznych cyklicznych skanów
+    // Pierwsze załadowanie
     loadAll(); loadTargets(); loadSource(); loadHistory();
 
-    // SignalR: tylko powiadomienia (BEZ auto-odświeżania)
+    // SignalR – dyski: tylko powiadomienia
     const conn = new signalR.HubConnectionBuilder().withUrl('/hubs/disks').withAutomaticReconnect().build();
     conn.on('deviceAdded',  evt => { showToast(`Wykryto nowe urządzenie (USB?): ${evt.name}. Kliknij „Odśwież”.`); });
     conn.on('deviceRemoved',evt => { showToast(`Odłączono urządzenie: ${evt.path}. Kliknij „Odśwież”.`); });
     conn.start().catch(err => console.error('SignalR error:', err));
 
+    // SignalR – live log z backupu (obsługa starego i nowego formatu)
     const bconn = new signalR.HubConnectionBuilder().withUrl('/hubs/backup').withAutomaticReconnect().build();
-    bconn.on('backupLog', x => appendLog(x.line));
+    bconn.on('backupLog', payload => {
+      if (typeof payload === 'string'){ appendLog('info', payload); return; }
+      const lvl = payload.level || 'info';
+      appendLog(lvl, payload.line || payload.message || '', payload.ts);
+    });
     bconn.on('backupStatus', s => {
-      appendLog(`[${s.state}] ${s.message}`);
+      appendLog('info', `[${s.state}] ${s.message}`);
       if (s.state === 'Completed' || s.state === 'Failed') { loadHistory(); }
     });
-    bconn.start().catch(err => console.error('Backup hub error:', err));
+    bconn.start().then(fetchCurrentLog).catch(err => console.error('Backup hub error:', err));
+
+    function setPlan(msg){ document.getElementById('plan-info').textContent = msg; }
   </script>
 </body>
 </html>

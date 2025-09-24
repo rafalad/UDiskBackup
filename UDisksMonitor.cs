@@ -24,7 +24,6 @@ public class UDisksMonitor : BackgroundService
         try
         {
             _conn = new Connection(Address.System);
-            // W tej wersji Tmds.DBus nie ma ConnectAsync(CancellationToken)
             await _conn.ConnectAsync();
 
             var mgr = _conn.CreateProxy<IObjectManager>("org.freedesktop.UDisks2", "/org/freedesktop/UDisks2");
@@ -43,13 +42,12 @@ public class UDisksMonitor : BackgroundService
                 _ = _hub.Clients.All.SendAsync("deviceRemoved", new { path = evt.path.ToString(), when = DateTimeOffset.UtcNow });
             });
 
-            // Utrzymaj serwis przy życiu, dopóki nie poproszą o stop
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
-        catch (TaskCanceledException) { /* normalne przy zamknięciu */ }
+        catch (TaskCanceledException) { }
         catch
         {
-            // fallback: działa reszta aplikacji, tylko bez realtime
+            
         }
     }
 

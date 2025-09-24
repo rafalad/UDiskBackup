@@ -1,5 +1,5 @@
 using System.Text.Json.Serialization;
-
+/*
 namespace UDiskBackup;
 
 public record Partition(
@@ -20,3 +20,4 @@ public record DiskDevice(
     [property: JsonPropertyName("rotational")] bool Rotational,
     [property: JsonPropertyName("partitions")] IReadOnlyList<Partition> Partitions
 );
+*/

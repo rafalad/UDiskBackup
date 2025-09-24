@@ -8,8 +8,8 @@ public class DiskInfoService
 {
     public async Task<IReadOnlyList<DiskDevice>> GetDisksAsync()
     {
-        // 1) Główna ścieżka: lsblk z jawnie podanymi kolumnami (bez -O)
-        var cols = "NAME,TYPE,SIZE,ROTA,TRAN,VENDOR,MODEL,SERIAL,PATH,FSTYPE,MOUNTPOINT,MOUNTPOINTS";
+        // 1) Główna ścieżka: lsblk z jawnie podanymi kolumnami (bez -O), + LABEL
+        var cols = "NAME,TYPE,SIZE,ROTA,TRAN,VENDOR,MODEL,SERIAL,PATH,FSTYPE,MOUNTPOINT,MOUNTPOINTS,LABEL";
         var (exit, stdout, stderr) = await Run("lsblk", $"-J -b -o {cols}");
         if (exit == 0 && !string.IsNullOrWhiteSpace(stdout))
         {
@@ -18,7 +18,7 @@ public class DiskInfoService
                 return await FixTransportsAsync(parsed); // udev/sysfs fallback dla USB
         }
 
-        // 2) Plan B: lsblk minimalny (bez -o listy)
+        // 2) Plan B: lsblk minimalny (bez listy kolumn)
         var (exit2, stdout2, _) = await Run("lsblk", "-J -b");
         if (exit2 == 0 && !string.IsNullOrWhiteSpace(stdout2))
         {
@@ -91,7 +91,16 @@ public class DiskInfoService
                 }
 
                 var fstype = GetString(p, "fstype");
-                parts.Add(new Partition(pPath!, fstype, string.IsNullOrWhiteSpace(mp) ? null : mp, pSizeHuman));
+                var label  = GetString(p, "label");
+
+                parts.Add(new Partition(
+                    Path: pPath!,
+                    FsType: fstype,
+                    MountPoint: string.IsNullOrWhiteSpace(mp) ? null : mp,
+                    Size: pSizeHuman,
+                    SizeBytes: pSize,
+                    Label: string.IsNullOrWhiteSpace(label) ? null : label
+                ));
             }
         }
 
@@ -104,6 +113,7 @@ public class DiskInfoService
             Serial: serial,
             Size: sizeHuman,
             Rotational: rotational,
+            SizeBytes: sizeBytes,
             Partitions: parts
         );
     }
@@ -118,6 +128,8 @@ public class DiskInfoService
 
         // mapa mountów z /proc/self/mounts
         var mounts = ReadMounts();
+        // mapowanie LABEL -> /dev/<part>
+        var labelMap = ReadLabelsFromByLabel();
 
         foreach (var devDir in Directory.EnumerateDirectories(sysBlock))
         {
@@ -126,7 +138,8 @@ public class DiskInfoService
             if (!Regex.IsMatch(name, @"^(sd[a-z]+|nvme\d+n\d+|vd[a-z]+|hd[a-z]+|mmcblk\d+)$")) continue;
 
             string devPath = "/dev/" + name;
-            long? bytes = ReadLongFile(Path.Combine(devDir, "size")).GetValueOrDefault() * 512L;
+            long? sectors = ReadLongFile(Path.Combine(devDir, "size"));
+            long? bytes = sectors.HasValue ? sectors.Value * 512L : null;
             var rotational = (ReadLongFile(Path.Combine(devDir, "queue", "rotational")) ?? 0) == 1;
 
             string? vendor = ReadString(Path.Combine(devDir, "device", "vendor"));
@@ -139,24 +152,28 @@ public class DiskInfoService
             var real = TryReadLink(devDir);
             if (!string.IsNullOrEmpty(real) && real!.Contains("/usb", StringComparison.OrdinalIgnoreCase)) transport = "usb";
 
-            // partycje: katalogi zaczynające się od nazwy urządzenia (np. sda1, sda2…)
+            // partycje: katalogi zaczynające się od nazwy urządzenia (np. sda1, nvme0n1p1)
             var parts = new List<Partition>();
             foreach (var child in Directory.EnumerateFileSystemEntries(devDir))
             {
                 var bn = Path.GetFileName(child);
-                if (!bn.StartsWith(name, StringComparison.Ordinal)) continue; // np. sda1
+                if (!bn.StartsWith(name, StringComparison.Ordinal)) continue;
                 if (!Regex.IsMatch(bn, @"^\w+\d+$")) continue;
 
                 var pPath = "/dev/" + bn;
-                long? pBytes = ReadLongFile(Path.Combine("/sys/class/block", bn, "size")).GetValueOrDefault() * 512L;
+                long? pSectors = ReadLongFile(Path.Combine("/sys/class/block", bn, "size"));
+                long? pBytes = pSectors.HasValue ? pSectors.Value * 512L : null;
                 var mp = mounts.TryGetValue(pPath, out var m) ? m.mountPoint : null;
                 var fs = mounts.TryGetValue(pPath, out var m2) ? m2.fstype : null;
+                var label = labelMap.TryGetValue(pPath, out var L) ? L : null;
 
                 parts.Add(new Partition(
                     Path: pPath,
                     FsType: fs,
                     MountPoint: mp,
-                    Size: pBytes.HasValue ? Human(pBytes.Value) : null
+                    Size: pBytes.HasValue ? Human(pBytes.Value) : null,
+                    SizeBytes: pBytes,
+                    Label: label
                 ));
             }
 
@@ -169,6 +186,7 @@ public class DiskInfoService
                 Serial: OrNull(serial),
                 Size: bytes.HasValue ? Human(bytes.Value) : null,
                 Rotational: rotational,
+                SizeBytes: bytes,
                 Partitions: parts
             ));
         }
@@ -195,6 +213,32 @@ public class DiskInfoService
         return dict;
     }
 
+    private static Dictionary<string,string> ReadLabelsFromByLabel()
+    {
+        var map = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        var dir = "/dev/disk/by-label";
+        if (!Directory.Exists(dir)) return map;
+
+        foreach (var link in Directory.EnumerateFileSystemEntries(dir))
+        {
+            try
+            {
+                var label = Path.GetFileName(link);
+                var target = File.ResolveLinkTarget(link, true);
+                if (target == null) continue;
+                var full = target.FullName;
+                var devName = Path.GetFileName(full);
+                if (!string.IsNullOrEmpty(devName))
+                {
+                    var devPath = "/dev/" + devName;
+                    map[devPath] = label;
+                }
+            }
+            catch { /* ignore */ }
+        }
+        return map;
+    }
+
     // ---------- Transport fix (udevadm/sysfs) ----------
 
     private static async Task<IReadOnlyList<DiskDevice>> FixTransportsAsync(List<DiskDevice> list)
@@ -206,6 +250,7 @@ public class DiskInfoService
                 continue;
 
             var name = Path.GetFileName(d.Path);
+
             // 1) udevadm properties
             var (e1, props, _) = await Run("udevadm", $"info -q property -n {d.Path}");
             if (e1 == 0 && !string.IsNullOrWhiteSpace(props))
@@ -293,3 +338,27 @@ public class DiskInfoService
         }
     }
 }
+
+// ---------- Rekordy modeli ----------
+
+public record DiskDevice(
+    string Path,
+    string Type,
+    string? Transport,
+    string? Vendor,
+    string? Model,
+    string? Serial,
+    string? Size,        // ludzki format
+    bool   Rotational,
+    long?  SizeBytes,    // liczbowo, przydatne do filtrów > 0
+    List<Partition> Partitions
+);
+
+public record Partition(
+    string Path,
+    string? FsType,
+    string? MountPoint,
+    string? Size,        // ludzki format
+    long?  SizeBytes,    // liczbowo
+    string? Label        // etykieta FS (LABEL)
+);
