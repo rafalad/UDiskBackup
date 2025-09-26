@@ -8,7 +8,7 @@ set -e
 PROJECT_NAME="udiskbackup"
 IMAGE_NAME="udiskbackup:latest"
 NAMESPACE="apps"
-REMOTE_HOST="zotac@ubuntu"
+REMOTE_HOST="zotac@192.168.1.109"
 APP_DIR="/home/zotac/udiskbackup"
 
 echo "🚀 UDiskBackup Deployment to k3s"

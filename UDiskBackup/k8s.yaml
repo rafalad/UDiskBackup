@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: udiskbackup
-        image: udiskbackup:latest
+        image: udiskbackup-k3s:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
@@ -63,15 +63,15 @@ spec:
             cpu: "500m"
         readinessProbe:
           httpGet:
-            path: /api/disks
-            port: http
+            path: /
+            port: 5101
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
         livenessProbe:
           httpGet:
-            path: /api/disks
-            port: http
+            path: /
+            port: 5101
           initialDelaySeconds: 30
           periodSeconds: 20
           timeoutSeconds: 10
@@ -105,7 +105,7 @@ spec:
           path: /run/udev
           type: Directory
       nodeSelector:
-        kubernetes.io/hostname: zotac  # Ensure pod runs on the zotac node
+        kubernetes.io/hostname: ubuntu  # Ensure pod runs on the ubuntu node
       restartPolicy: Always
 
 ---
@@ -123,9 +123,10 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: http
+    targetPort: 5101
     protocol: TCP
-  type: ClusterIP
+    nodePort: 30004
+  type: NodePort
 
 ---
 # Ingress (assuming Traefik is default in k3s)

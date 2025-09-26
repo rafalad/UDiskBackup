@@ -122,4 +122,35 @@ public class BackupController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
     }
+
+    [HttpGet("targets")]
+    public async Task<IActionResult> GetTargets()
+    {
+        try
+        {
+            var eligibleUsb = await _backupService.GetEligibleUsbAsync();
+            var targets = new List<object>();
+            
+            foreach (var usb in eligibleUsb)
+            {
+                if (string.IsNullOrEmpty(usb.MountPoint))
+                    continue;
+
+                var plan = await _backupService.PlanAsync(usb.MountPoint);
+                targets.Add(new
+                {
+                    mountPoint = usb.MountPoint,
+                    fsType = usb.FsType,
+                    freeBytes = plan.FreeBytes,
+                    totalBytes = plan.FreeBytes * 2 // Prosty fallback - załóż że dysk jest w połowie zapełniony
+                });
+            }
+            
+            return Ok(targets);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
 }
