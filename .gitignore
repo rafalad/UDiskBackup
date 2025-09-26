@@ -2,6 +2,7 @@
 bin/
 obj/
 out/
+dist/
 *.dll
 *.exe
 *.pdb
