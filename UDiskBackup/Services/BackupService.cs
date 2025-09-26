@@ -311,7 +311,7 @@ public class BackupService
                         ["summary"] = summary,
                         ["backupType"] = Directory.Exists(currentBackup) ? "incremental" : "full",
                         ["backupPath"] = incrementalBackup,
-                        ["linkDestPath"] = Directory.Exists(currentBackup) ? currentBackup : (string?)null,
+                        ["linkDestPath"] = Directory.Exists(currentBackup) ? (object)currentBackup : string.Empty,
                         ["deletedPath"] = deleted,
                         ["spaceSavings"] = new 
                         {

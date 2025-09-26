@@ -43,7 +43,7 @@ code{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:.05re
 .logview{margin-top:.6rem;max-height:340px;overflow:auto;background:#0b1020;color:#e6edf3;padding:.75rem;border-radius:10px;border:1px solid #1f2937;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:.92rem;line-height:1.25rem}
 .logline{white-space:pre-wrap;word-break:break-word}
 .logline .ts{opacity:.6;margin-right:.5rem}
-.logline.info{} /* domyślny */
+/* .logline.info - domyślny */
 .logline.progress{opacity:.9}
 .logline.warn{color:#fde68a}
 .logline.error{color:#fecaca}
