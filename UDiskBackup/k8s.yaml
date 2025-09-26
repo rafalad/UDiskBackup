@@ -1,25 +1,3 @@
-# ConfigMap with application configuration
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: udiskbackup-config
-  namespace: apps
-  labels:
-    app: udiskbackup
-data:
-  appsettings.Production.json: |
-    {
-      "Logging": {
-        "LogLevel": {
-          "Default": "Information",
-          "Microsoft.AspNetCore": "Warning"
-        }
-      },
-      "AllowedHosts": "*",
-      "SourcePath": "/mnt/shared"
-    }
-
----
 # Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -50,12 +28,10 @@ spec:
           value: "http://0.0.0.0:8080"
         - name: ASPNETCORE_ENVIRONMENT
           value: "Production"
+        - name: SourcePath
+          value: "/mnt/shared"
         # Application needs real host paths for USB management:
         volumeMounts:
-        - name: config-volume
-          mountPath: /app/appsettings.Production.json
-          subPath: appsettings.Production.json
-          readOnly: true
         - name: host-mnt-shared     # source directory
           mountPath: /mnt/shared
           readOnly: true
@@ -100,9 +76,6 @@ spec:
           periodSeconds: 20
           timeoutSeconds: 10
       volumes:
-      - name: config-volume
-        configMap:
-          name: udiskbackup-config
       - name: host-mnt-shared
         hostPath:
           path: /mnt/shared

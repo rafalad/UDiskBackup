@@ -21,7 +21,7 @@ public class SourceController : ControllerBase
     {
         try
         {
-            var sourcePath = _configuration["SourcePath"] ?? "/mnt/shared";
+            var sourcePath = _configuration["SourcePath"] ?? Environment.GetEnvironmentVariable("SourcePath") ?? "/mnt/shared";
             var status = await _sourceService.GetStatusAsync(sourcePath);
             return Ok(status);
         }

@@ -153,7 +153,7 @@ public class BackupService
 
     private string GetSourcePath()
     {
-        return _configuration["SourcePath"] ?? "/mnt/shared";
+        return _configuration["SourcePath"] ?? Environment.GetEnvironmentVariable("SourcePath") ?? "/mnt/shared";
     }
 
     public async Task<BackupPlan> PlanAsync(string targetMount, string? source = null)
