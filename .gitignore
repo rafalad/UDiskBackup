@@ -1,0 +1,40 @@
+# .NET Core
+bin/
+obj/
+out/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.staticwebassets.json
+
+# Visual Studio
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Backup files
+*.backup
+*~
+
+# Temporary files
+tmp/
+temp/
