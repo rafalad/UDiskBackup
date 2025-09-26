@@ -1,0 +1,29 @@
+[Unit]
+Description=UDiskBackup - USB Backup Service
+After=network.target
+After=multi-user.target
+
+[Service]
+Type=simple
+User=zotac
+WorkingDirectory=/home/zotac/UDiskBackup/UDiskBackup
+ExecStart=/usr/bin/dotnet /home/zotac/UDiskBackup/UDiskBackup/bin/Release/net8.0/UDiskBackup.dll
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://0.0.0.0:5101
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+Restart=always
+RestartSec=10
+SyslogIdentifier=udiskbackup
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/mnt /media /var/log
+SupplementaryGroups=disk plugdev
+
+[Install]
+WantedBy=multi-user.target

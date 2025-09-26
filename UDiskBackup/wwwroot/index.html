@@ -11,7 +11,7 @@
 
   <div id="src-banner" class="banner bad" style="display:none">
     <strong>Źródło niedostępne.</strong>
-    <span class="muted">Sprawdź, czy katalog /mnt/shared jest zamontowany i czytelny.</span>
+    <span class="muted">Sprawdź, czy katalog źródłowy jest zamontowany i czytelny.</span>
   </div>
   <div id="src-banner-ok" class="banner ok" style="display:none">
     <strong>Źródło dostępne:</strong>
@@ -193,6 +193,7 @@
     }
 
     let sourceAvailable=false;
+    let sourcePath='/mnt/shared'; // Default, will be updated from API
     let lastPlan=null;
     let eligibleUsbCount=0;
 
@@ -200,6 +201,7 @@
       try{
         const s=await fetchJson('/api/source/status');
         sourceAvailable=!!(s.exists&&s.readable);
+        sourcePath=s.path||'/mnt/shared'; // Update global source path
         const bad=document.getElementById('src-banner');
         const ok=document.getElementById('src-banner-ok');
         if(sourceAvailable){
@@ -297,7 +299,7 @@
       const sel=document.getElementById('usb-target');
       const mp=sel.value;
       if(!mp){ setPlan('Wybierz cel USB'); return; }
-      if(!sourceAvailable){ setPlan('Źródło /mnt/shared niedostępne'); return; }
+      if(!sourceAvailable){ setPlan(`Źródło ${sourcePath} niedostępne`); return; }
       try{
         const p=await fetchJson('/api/backup/plan?targetMount='+encodeURIComponent(mp));
         lastPlan=p;
@@ -313,7 +315,7 @@
       const sel=document.getElementById('usb-target');
       const mp=sel.value;
       if(!mp){ setPlan('Wybierz cel USB'); return; }
-      if(!sourceAvailable){ setPlan('Źródło /mnt/shared niedostępne'); return; }
+      if(!sourceAvailable){ setPlan(`Źródło ${sourcePath} niedostępne`); return; }
       try{
         const p=await fetchJson('/api/backup/plan?targetMount='+encodeURIComponent(mp));
         lastPlan=p;

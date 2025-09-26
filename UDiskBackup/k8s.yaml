@@ -1,19 +1,46 @@
+# ConfigMap with application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: udiskbackup-config
+  namespace: apps
+  labels:
+    app: udiskbackup
+data:
+  appsettings.Production.json: |
+    {
+      "Logging": {
+        "LogLevel": {
+          "Default": "Information",
+          "Microsoft.AspNetCore": "Warning"
+        }
+      },
+      "AllowedHosts": "*",
+      "SourcePath": "/mnt/shared"
+    }
+
+---
+# Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: udiskbackup
-  labels: { app: udiskbackup }
+  namespace: apps
+  labels:
+    app: udiskbackup
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: udiskbackup }
+    matchLabels:
+      app: udiskbackup
   template:
     metadata:
-      labels: { app: udiskbackup }
+      labels:
+        app: udiskbackup
     spec:
       containers:
       - name: udiskbackup
-        image: udiskbackup:1
+        image: udiskbackup:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
@@ -21,75 +48,122 @@ spec:
         env:
         - name: ASPNETCORE_URLS
           value: "http://0.0.0.0:8080"
-        # appka potrzebuje realnych ścieżek hosta:
+        - name: ASPNETCORE_ENVIRONMENT
+          value: "Production"
+        # Application needs real host paths for USB management:
         volumeMounts:
-        - name: host-mnt-shared     # źródło
+        - name: config-volume
+          mountPath: /app/appsettings.Production.json
+          subPath: appsettings.Production.json
+          readOnly: true
+        - name: host-mnt-shared     # source directory
           mountPath: /mnt/shared
           readOnly: true
-        - name: host-media          # miejsca montowania USB (UDisks najczęściej /media/<user>/<Label>)
+        - name: host-media          # USB mount points (UDisks usually /media/<user>/<Label>)
           mountPath: /media
-        - name: host-mnt            # alternatywne miejsca montowania USB
+        - name: host-mnt            # alternative USB mount points
           mountPath: /mnt
-        - name: host-run-media      # niektóre dystrybucje montują w /run/media/<user>/<Label>
+        - name: host-run-media      # some distros mount in /run/media/<user>/<Label>
           mountPath: /run/media
-        - name: host-sys            # lsblk/udev widzą prawdziwy sprzęt
+        - name: host-sys            # lsblk/udev see real hardware
           mountPath: /sys
           readOnly: true
-        - name: host-dbus           # socket systemowego D-Bus (UDisks2 events)
+        - name: host-dbus           # system D-Bus socket (UDisks2 events)
           mountPath: /run/dbus/system_bus_socket
           readOnly: true
-        - name: host-run-udev       # metadata udev (nie zawsze konieczne)
+        - name: host-run-udev       # udev metadata
           mountPath: /run/udev
           readOnly: true
         securityContext:
-          # prościej i bez niespodzianek w domowym k3s:
+          # Privileged mode needed for USB operations in home k3s:
           privileged: true
           runAsUser: 0
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         readinessProbe:
-          httpGet: { path: /api/disks, port: http }
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        livenessProbe:
-          httpGet: { path: /api/disks, port: http }
+          httpGet:
+            path: /api/disks
+            port: http
           initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/disks
+            port: http
+          initialDelaySeconds: 30
           periodSeconds: 20
+          timeoutSeconds: 10
       volumes:
+      - name: config-volume
+        configMap:
+          name: udiskbackup-config
       - name: host-mnt-shared
-        hostPath: { path: /mnt/shared, type: DirectoryOrCreate }
+        hostPath:
+          path: /mnt/shared
+          type: DirectoryOrCreate
       - name: host-media
-        hostPath: { path: /media, type: DirectoryOrCreate }
+        hostPath:
+          path: /media
+          type: DirectoryOrCreate
       - name: host-mnt
-        hostPath: { path: /mnt, type: DirectoryOrCreate }
+        hostPath:
+          path: /mnt
+          type: DirectoryOrCreate
       - name: host-run-media
-        hostPath: { path: /run/media, type: DirectoryOrCreate }
+        hostPath:
+          path: /run/media
+          type: DirectoryOrCreate
       - name: host-sys
-        hostPath: { path: /sys, type: Directory }
+        hostPath:
+          path: /sys
+          type: Directory
       - name: host-dbus
-        hostPath: { path: /run/dbus/system_bus_socket, type: Socket }
+        hostPath:
+          path: /run/dbus/system_bus_socket
+          type: Socket
       - name: host-run-udev
-        hostPath: { path: /run/udev, type: Directory }
+        hostPath:
+          path: /run/udev
+          type: Directory
+      nodeSelector:
+        kubernetes.io/hostname: zotac  # Ensure pod runs on the zotac node
+      restartPolicy: Always
 
 ---
+# Service
 apiVersion: v1
 kind: Service
 metadata:
   name: udiskbackup
-  labels: { app: udiskbackup }
+  namespace: apps
+  labels:
+    app: udiskbackup
 spec:
-  selector: { app: udiskbackup }
+  selector:
+    app: udiskbackup
   ports:
   - name: http
     port: 80
     targetPort: http
+    protocol: TCP
+  type: ClusterIP
 
 ---
-# Traefik jest domyślnie w k3s. Jeśli używasz innego IngressController, dostosuj adnotacje.
+# Ingress (assuming Traefik is default in k3s)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: udiskbackup
+  namespace: apps
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.rule: Host(`udiskbackup.local`)
 spec:
   rules:
   - host: udiskbackup.local

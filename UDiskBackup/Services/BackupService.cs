@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using UDiskBackup.Hubs;
 using UDiskBackup.Models;
@@ -18,6 +19,7 @@ public class BackupService
     private readonly DiskInfoService _disks;
     private readonly IHubContext<BackupHub> _hub;
     private readonly ILogger<BackupService> _logger;
+    private readonly IConfiguration _configuration;
     private readonly object _lock = new();
     private bool _busy;
     private readonly StringBuilder _liveBuffer = new();
@@ -54,11 +56,12 @@ public class BackupService
         }
     });
 
-    public BackupService(DiskInfoService disks, IHubContext<BackupHub> hub, ILogger<BackupService> logger)
+    public BackupService(DiskInfoService disks, IHubContext<BackupHub> hub, ILogger<BackupService> logger, IConfiguration configuration)
     {
         _disks = disks;
         _hub = hub;
         _logger = logger;
+        _configuration = configuration;
         _logger.LogInformation("BackupService initialized - Running as root: {IsRoot}, udisksctl available: {HasUdisksctl}", 
             _isRoot, _hasUdisksctl.Value);
     }
@@ -148,11 +151,17 @@ public class BackupService
         return targets;
     }
 
-    public async Task<BackupPlan> PlanAsync(string targetMount, string source = "/mnt/shared")
+    private string GetSourcePath()
+    {
+        return _configuration["SourcePath"] ?? "/mnt/shared";
+    }
+
+    public async Task<BackupPlan> PlanAsync(string targetMount, string? source = null)
     {
         if (string.IsNullOrWhiteSpace(targetMount) || !targetMount.StartsWith('/'))
             throw new ArgumentException("Niepoprawny mountpoint.");
 
+        source ??= GetSourcePath();
         var di = new DriveInfo(targetMount);
         var ts = DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
         
@@ -172,8 +181,9 @@ public class BackupService
         return new BackupPlan(source, incrementalBackup, deleted, args, estimated, free, enough);
     }
 
-    public Task<string> StartAsync(string targetMount, string source = "/mnt/shared")
+    public Task<string> StartAsync(string targetMount, string? source = null)
     {
+        source ??= GetSourcePath();
         if (string.IsNullOrWhiteSpace(targetMount) || !targetMount.StartsWith('/'))
             throw new ArgumentException("Niepoprawny mountpoint.");
         if (!Directory.Exists(targetMount))
