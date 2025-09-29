@@ -52,5 +52,6 @@ public record BackupHistoryItem(
     string SummaryJsonPath,
     string? SummaryTxtPath,
     int? NumberOfTransferredFiles,
-    long? TotalTransferredFileSize
+    long? TotalTransferredFileSize,
+    string? BackupType
 );

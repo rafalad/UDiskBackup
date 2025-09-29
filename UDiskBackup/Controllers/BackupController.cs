@@ -153,4 +153,54 @@ public class BackupController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
     }
+
+    [HttpGet("log/{operationId}")]
+    public async Task<IActionResult> GetBackupLog(string operationId, [FromQuery] bool? download)
+    {
+        try
+        {
+            // Szukamy logi w historii backupów
+            var history = await _backupService.GetHistoryAsync(null, 1000); // Pobierz więcej historii
+            var item = history.FirstOrDefault(h => h.OperationId.Equals(operationId, StringComparison.OrdinalIgnoreCase));
+            
+            if (item == null)
+            {
+                return NotFound(new { error = $"Nie znaleziono backupu o ID: {operationId}" });
+            }
+
+            // Sprawdź czy istnieje plik .txt z logami
+            string logContent = "";
+            if (!string.IsNullOrEmpty(item.SummaryTxtPath) && System.IO.File.Exists(item.SummaryTxtPath))
+            {
+                logContent = await System.IO.File.ReadAllTextAsync(item.SummaryTxtPath);
+            }
+            else if (System.IO.File.Exists(item.SummaryJsonPath))
+            {
+                // Fallback - czytaj z JSON i sformatuj
+                var jsonContent = await System.IO.File.ReadAllTextAsync(item.SummaryJsonPath);
+                var summary = System.Text.Json.JsonSerializer.Deserialize<object>(jsonContent);
+                logContent = System.Text.Json.JsonSerializer.Serialize(summary, new System.Text.Json.JsonSerializerOptions 
+                { 
+                    WriteIndented = true 
+                });
+            }
+            else
+            {
+                return NotFound(new { error = "Plik z logami nie został znaleziony" });
+            }
+
+            if (download == true)
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(logContent);
+                var fileName = $"backup-log-{operationId}-{item.StartedAtUtc:yyyyMMdd-HHmmss}.txt";
+                return File(bytes, "text/plain; charset=utf-8", fileName);
+            }
+
+            return Content(logContent, "text/plain; charset=utf-8");
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
 }

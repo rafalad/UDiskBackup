@@ -119,6 +119,7 @@
           <th>Czas</th>
           <th>Cel (mount)</th>
           <th>Podsumowanie</th>
+          <th>Akcje</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -142,6 +143,25 @@
       <div><strong>Framework:</strong> <span id="framework">-</span></div>
       <div><strong>System operacyjny:</strong> <span id="os-info">-</span></div>
       <div><strong>Architektura:</strong> <span id="architecture">-</span></div>
+    </div>
+  </div>
+
+  <!-- Modal do wyświetlania logów backupu -->
+  <div id="log-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Log backupu</h3>
+        <span class="modal-close" onclick="closeLogModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom: 1rem;">
+          <strong>Operation ID:</strong> <span id="log-operation-id">-</span>
+          <button class="btn btn-sm" style="margin-left: 1rem;" onclick="downloadCurrentLog()">⬇️ Pobierz log</button>
+        </div>
+        <div id="log-content" class="log-viewer">
+          Ładowanie logu...
+        </div>
+      </div>
     </div>
   </div>
 
@@ -524,6 +544,8 @@
         const size=it.totalTransferredFileSize!=null?human(it.totalTransferredFileSize):'-';
         const cnt=it.numberOfTransferredFiles?.toString() ?? '-';
         const sum=it.summaryTxtPath || it.summaryJsonPath;
+        const logButton = `<button class="btn btn-sm" onclick="showBackupLog('${it.operationId}')" title="Pokaż szczegółowy log backupu">📋 Log</button>`;
+        const downloadButton = `<a class="btn btn-sm" href="/api/backup/log/${it.operationId}?download=1" title="Pobierz log backupu" download>⬇️ Pobierz</a>`;
         tr.innerHTML=`
           <td>${dtLocal(it.startedAtUtc)}</td>
           <td>${pill}</td>
@@ -532,12 +554,13 @@
           <td>${cnt}</td>
           <td>${fmtDuration(it.duration)}</td>
           <td><code>${it.targetMount}</code></td>
-          <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><code title="${sum}">${sum}</code></td>`;
+          <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><code title="${sum}">${sum}</code></td>
+          <td style="white-space:nowrap;">${logButton} ${downloadButton}</td>`;
         tb.appendChild(tr);
       }
       if(items.length===0){
         const tr=document.createElement('tr');
-        tr.innerHTML=`<td colspan="8" class="muted">Brak podsumowań na podłączonych dyskach.</td>`;
+        tr.innerHTML=`<td colspan="9" class="muted">Brak podsumowań na podłączonych dyskach.</td>`;
         tb.appendChild(tr);
       }
     }
@@ -714,6 +737,49 @@
       await fetchCurrentLog();
       await fetchCurrentStatus();
     }).catch(err=>console.error('Backup hub error:',err));
+
+    // Funkcje modala logów
+    let currentLogOperationId = '';
+    
+    async function showBackupLog(operationId) {
+      try {
+        currentLogOperationId = operationId;
+        document.getElementById('log-operation-id').textContent = operationId;
+        document.getElementById('log-content').textContent = 'Ładowanie logu...';
+        document.getElementById('log-modal').style.display = 'block';
+        
+        const response = await fetch(`/api/backup/log/${operationId}`);
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Błąd pobierania logu' }));
+          throw new Error(error.error || 'Błąd pobierania logu');
+        }
+        
+        const logContent = await response.text();
+        document.getElementById('log-content').textContent = logContent;
+      } catch (error) {
+        document.getElementById('log-content').textContent = `Błąd ładowania logu: ${error.message}`;
+        console.error('Error loading backup log:', error);
+      }
+    }
+    
+    function closeLogModal() {
+      document.getElementById('log-modal').style.display = 'none';
+      currentLogOperationId = '';
+    }
+    
+    function downloadCurrentLog() {
+      if (currentLogOperationId) {
+        window.open(`/api/backup/log/${currentLogOperationId}?download=1`, '_blank');
+      }
+    }
+    
+    // Zamykaj modal po kliknięciu poza nim
+    window.onclick = function(event) {
+      const modal = document.getElementById('log-modal');
+      if (event.target === modal) {
+        closeLogModal();
+      }
+    }
   </script>
 </body>
 </html>
