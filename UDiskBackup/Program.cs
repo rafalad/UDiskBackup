@@ -11,8 +11,15 @@ builder.Services.AddSingleton<BackupService>();
 builder.Services.AddSingleton<SourceService>();
 builder.Services.AddHostedService<UDisksMonitor>();
 
+// Dodaj Blazor SignalR Service
+builder.Services.AddScoped<BlazorSignalRService>();
+
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
+
+// Dodaj Blazor Server
+builder.Services.AddRazorPages();
+builder.Services.AddServerSideBlazor();
 
 builder.Services.AddCors(options =>
 {
@@ -35,9 +42,10 @@ app.UseStaticFiles();
 app.UseCors("AllowAll");
 app.UseRouting();
 
-app.MapGet("/", () => Results.Redirect("/index.html"));
-
 app.MapControllers();
+app.MapRazorPages();
+app.MapBlazorHub();
+app.MapFallbackToPage("/_Host");
 
 app.MapHub<DiskHub>("/hubs/disks");
 app.MapHub<BackupHub>("/hubs/backup");

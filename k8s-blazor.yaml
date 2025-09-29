@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udiskbackup-blazor
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udiskbackup-blazor
+  template:
+    metadata:
+      labels:
+        app: udiskbackup-blazor
+    spec:
+      containers:
+      - name: udiskbackup-blazor
+        image: docker.io/library/udiskbackup-blazor-k3s:20250929-144310
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 5101
+        env:
+        - name: ASPNETCORE_ENVIRONMENT
+          value: "Production"
+        - name: ASPNETCORE_URLS
+          value: "http://0.0.0.0:5101"
+        volumeMounts:
+        - name: shared-data
+          mountPath: /mnt/shared
+        - name: dev-disk
+          mountPath: /dev
+          readOnly: false
+        - name: run-udev
+          mountPath: /run/udev
+        - name: dbus-system
+          mountPath: /var/run/dbus/system_bus_socket
+        - name: media-mount
+          mountPath: /media
+        - name: mnt-mount  
+          mountPath: /mnt
+        securityContext:
+          privileged: true
+          runAsUser: 0
+      volumes:
+      - name: shared-data
+        hostPath:
+          path: /mnt/shared
+      - name: dev-disk
+        hostPath:
+          path: /dev
+      - name: run-udev
+        hostPath:
+          path: /run/udev
+      - name: dbus-system
+        hostPath:
+          path: /var/run/dbus/system_bus_socket
+      - name: media-mount
+        hostPath:
+          path: /media
+      - name: mnt-mount
+        hostPath:
+          path: /mnt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udiskbackup-blazor
+  namespace: apps
+spec:
+  selector:
+    app: udiskbackup-blazor
+  ports:
+  - protocol: TCP
+    port: 5101
+    targetPort: 5101
+    nodePort: 30004
+  type: NodePort

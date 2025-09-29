@@ -1253,4 +1253,41 @@ public class BackupService
             throw new InvalidOperationException($"Nie udało się utworzyć symlink'u: {ex.Message}", ex);
         }
     }
+
+    public async Task<string?> GetBackupLogAsync(string operationId)
+    {
+        try
+        {
+            // Szukamy logi w historii backupów
+            var history = await GetHistoryAsync(null, 1000); // Pobierz więcej historii
+            var item = history.FirstOrDefault(h => h.OperationId.Equals(operationId, StringComparison.OrdinalIgnoreCase));
+            
+            if (item == null)
+            {
+                return null;
+            }
+
+            // Sprawdź czy istnieje plik .txt z logami
+            if (!string.IsNullOrEmpty(item.SummaryTxtPath) && File.Exists(item.SummaryTxtPath))
+            {
+                return await File.ReadAllTextAsync(item.SummaryTxtPath);
+            }
+            else if (File.Exists(item.SummaryJsonPath))
+            {
+                // Fallback - czytaj z JSON i sformatuj
+                var jsonContent = await File.ReadAllTextAsync(item.SummaryJsonPath);
+                var summary = JsonSerializer.Deserialize<object>(jsonContent);
+                return JsonSerializer.Serialize(summary, new JsonSerializerOptions 
+                { 
+                    WriteIndented = true 
+                });
+            }
+            
+            return null;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Błąd podczas pobierania logu: {ex.Message}", ex);
+        }
+    }
 }

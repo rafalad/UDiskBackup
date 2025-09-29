@@ -1,0 +1,139 @@
+@inject DiskInfoService DiskInfoService
+@inject BlazorSignalRService SignalRService
+@implements IAsyncDisposable
+
+<div class="status">
+    <div class="dot @(usbDisks.Any() ? "ok" : "bad")"></div>
+    <div>
+        <div><strong>@GetUsbStatusTitle()</strong></div>
+        <div class="muted">@GetUsbStatusSubtitle()</div>
+    </div>
+</div>
+
+@if (usbDisks.Any())
+{
+    <div class="usb-cards" style="display:grid">
+        @foreach (var disk in usbDisks)
+        {
+            var firstLabel = disk.Partitions?.FirstOrDefault(p => !string.IsNullOrEmpty(p.Label))?.Label ?? "-";
+            var diskUsage = CalculateDiskUsage(disk.Partitions ?? new List<PartitionModel>());
+            
+            <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.35rem">
+                    <div><strong>@($"{disk.Vendor} {disk.Model}".Trim())</strong></div>
+                    <div>
+                        <span class="label">USB</span>
+                        <span class="label">@((disk.Type ?? "").ToUpper())</span>
+                    </div>
+                </div>
+                <div class="muted" style="margin-bottom:.35rem">@disk.Path</div>
+                <div><strong>Etykieta:</strong> @firstLabel &nbsp;&nbsp; <strong>Zajęte/Wolne:</strong> @diskUsage</div>
+                <div><strong>Rozmiar:</strong> @(disk.Size ?? "-")</div>
+                <div style="margin-top:.5rem">
+                    <strong>Partycje:</strong><br/>
+                    @if (disk.Partitions?.Any() == true)
+                    {
+                        @foreach (var partition in disk.Partitions)
+                        {
+                            var label = !string.IsNullOrEmpty(partition.Label) ? $", label: {partition.Label}" : "";
+                            <div>@partition.Path (@(partition.Fstype ?? "-"), @partition.Size, @(partition.MountPoint ?? "-")@label)</div>
+                        }
+                    }
+                    else
+                    {
+                        <span class="muted">brak partycji</span>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<DiskModel> usbDisks = new();
+    private ISignalRSubscription? diskSubscription;
+    
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadUsbDisks();
+        
+        // Subscribe to disk changes for real-time updates
+        diskSubscription = SignalRService.SubscribeToDisks(this, OnDiskChanged);
+    }
+    
+    private async Task OnDiskChanged()
+    {
+        await LoadUsbDisks();
+        await InvokeAsync(StateHasChanged);
+    }
+    
+    public async Task RefreshAsync()
+    {
+        await LoadUsbDisks();
+        StateHasChanged();
+    }
+    
+    private async Task LoadUsbDisks()
+    {
+        try
+        {
+            usbDisks = await DiskInfoService.GetUsbDisksAsync();
+        }
+        catch (Exception ex)
+        {
+            usbDisks = new List<DiskModel>();
+            Console.WriteLine($"Error loading USB disks: {ex.Message}");
+        }
+    }
+    
+    private string CalculateDiskUsage(List<PartitionModel> partitions)
+    {
+        long totalUsed = 0;
+        long totalFree = 0;
+        bool hasData = false;
+        
+        foreach (var p in partitions)
+        {
+            if (p.UsedBytes.HasValue && p.FreeBytes.HasValue)
+            {
+                totalUsed += p.UsedBytes.Value;
+                totalFree += p.FreeBytes.Value;
+                hasData = true;
+            }
+        }
+        
+        if (!hasData) return "-";
+        
+        return $"{FormatGB(totalUsed)} / {FormatGB(totalFree)}";
+    }
+    
+    private string FormatGB(long bytes)
+    {
+        if (bytes <= 0) return "-";
+        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)).ToString("F1")} GB";
+    }
+    
+    private string GetUsbStatusTitle()
+    {
+        if (!usbDisks.Any()) 
+            return "Brak podłączonego dysku USB";
+        
+        return $"Wykryto dysk{(usbDisks.Count > 1 ? "i" : "")} USB: {usbDisks.Count}";
+    }
+    
+    private string GetUsbStatusSubtitle()
+    {
+        if (!usbDisks.Any())
+            return "Wymagany label USB_BACKUP i rozmiar > 0 B. Podłącz dysk, a potem kliknij Odśwież.";
+        
+        return "Parametry podłączonych urządzeń:";
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        if (diskSubscription != null)
+        {
+            await diskSubscription.DisposeAsync();
+        }
+    }
+}

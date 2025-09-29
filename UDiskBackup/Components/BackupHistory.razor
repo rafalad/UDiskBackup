@@ -1,0 +1,297 @@
+@using UDiskBackup.Services
+@using static UDiskBackup.Services.BackupService
+@inject BackupService BackupService
+@inject BlazorSignalRService SignalRService
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+
+<div class="panel" style="margin-top:1rem">
+    <div class="actions" style="justify-content:space-between">
+        <div><strong>Historia backupów</strong></div>
+        <div class="actions">
+            <label class="muted">Filtr (mount):</label>
+            <select @bind="selectedFilter" @bind:after="OnFilterChanged" class="btn" style="min-width:220px">
+                <option value="">Wszystkie podłączone</option>
+                @foreach (var target in availableTargets)
+                {
+                    <option value="@target">@target</option>
+                }
+            </select>
+            <button class="btn" @onclick="RefreshHistory">Odśwież</button>
+        </div>
+    </div>
+    <table id="hist">
+        <thead>
+            <tr>
+                <th>Start (lokalnie)</th>
+                <th>Wynik</th>
+                <th>Typ</th>
+                <th>Przesłane</th>
+                <th>Plików</th>
+                <th>Czas</th>
+                <th>Cel (mount)</th>
+                <th>Podsumowanie</th>
+                <th>Akcje</th>
+            </tr>
+        </thead>
+        <tbody>
+            @if (backupItems.Any())
+            {
+                @foreach (var item in backupItems)
+                {
+                    <tr>
+                        <td>@item.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                        <td>
+                            <span class="pill @(item.Success ? "ok" : "bad")">
+                                @(item.Success ? "OK" : "Błąd")
+                            </span>
+                        </td>
+                        <td>
+                            @if (!string.IsNullOrEmpty(item.BackupType))
+                            {
+                                <span class="pill @(item.BackupType == "full" ? "neutral" : "info")" style="font-size:0.8em">
+                                    @(item.BackupType == "full" ? "Full" : "Inc")
+                                </span>
+                            }
+                            else
+                            {
+                                <text>-</text>
+                            }
+                        </td>
+                        <td>@(item.TotalTransferredFileSize.HasValue ? FormatBytes(item.TotalTransferredFileSize.Value) : "-")</td>
+                        <td>@(item.NumberOfTransferredFiles?.ToString() ?? "-")</td>
+                        <td>@FormatDuration(item.Duration.ToString())</td>
+                        <td><code>@item.TargetMount</code></td>
+                        <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                            <code title="@GetSummaryPath(item)">@GetSummaryPath(item)</code>
+                        </td>
+                        <td style="white-space:nowrap;">
+                            <button class="btn btn-sm" @onclick="() => ShowBackupLog(item.OperationId)" title="Pokaż szczegółowy log backupu">
+                                📋 Log
+                            </button>
+                            <a class="btn btn-sm" href="/api/backup/log/@item.OperationId?download=true" title="Pobierz log backupu" download>
+                                ⬇️ Pobierz
+                            </a>
+                        </td>
+                    </tr>
+                }
+            }
+            else
+            {
+                <tr>
+                    <td colspan="9" class="muted">@(isLoading ? "Ładowanie historii..." : "Brak podsumowań na podłączonych dyskach.")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+<!-- Modal do wyświetlania logów backupu -->
+<div class="modal" style="display: @(showLogModal ? "block" : "none")">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Log backupu</h3>
+            <span class="modal-close" @onclick="CloseLogModal">&times;</span>
+        </div>
+        <div class="modal-body">
+            <div style="margin-bottom: 1rem;">
+                <strong>Operation ID:</strong> @currentLogOperationId
+                <button class="btn btn-sm" style="margin-left: 1rem;" @onclick="DownloadCurrentLog">⬇️ Pobierz log</button>
+            </div>
+            <div class="log-viewer" style="max-height: 400px; overflow-y: auto;">
+                @if (isLoadingLog)
+                {
+                    <text>Ładowanie logu...</text>
+                }
+                else if (!string.IsNullOrEmpty(logError))
+                {
+                    <div class="error">Błąd ładowania logu: @logError</div>
+                }
+                else
+                {
+                    <pre>@logContent</pre>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<BackupService.BackupHistoryItem> backupItems = new();
+    private List<string> availableTargets = new();
+    private string selectedFilter = "";
+    private bool isLoading = true;
+    
+    // Modal state
+    private bool showLogModal = false;
+    private string currentLogOperationId = "";
+    private string logContent = "";
+    private string logError = "";
+    private bool isLoadingLog = false;
+    
+    // SignalR subscription
+    private ISignalRSubscription? backupSubscription;
+    
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshHistory();
+        
+        // Subscribe to backup status changes for history refresh
+        backupSubscription = SignalRService.SubscribeToBackup(this, 
+            (level, message) => Task.CompletedTask, // Don't need logs here
+            OnBackupStatusChanged);
+    }
+    
+    private async Task OnBackupStatusChanged(string operationId, string state, string message)
+    {
+        // Refresh history when backup completes
+        if (state == "Completed" || state == "Failed" || state == "Cancelled" || state == "Stopped")
+        {
+            await Task.Delay(1000); // Small delay to ensure files are written
+            await RefreshHistory();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+    
+    public async Task RefreshAsync()
+    {
+        await RefreshHistory();
+    }
+    
+    private async Task RefreshHistory()
+    {
+        isLoading = true;
+        StateHasChanged();
+        
+        try
+        {
+            // Load backup history with optional filter  
+            backupItems = (await BackupService.GetHistoryAsync(selectedFilter)).ToList();
+            
+            // Update available targets for filter
+            availableTargets = backupItems.Select(x => x.TargetMount).Distinct().OrderBy(x => x).ToList();
+        }
+        catch (Exception ex)
+        {
+            backupItems = new List<BackupService.BackupHistoryItem>();
+            Console.WriteLine($"Error loading backup history: {ex.Message}");
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+    
+    private async Task OnFilterChanged()
+    {
+        await RefreshHistory();
+    }
+    
+    private async Task ShowBackupLog(string operationId)
+    {
+        currentLogOperationId = operationId;
+        showLogModal = true;
+        isLoadingLog = true;
+        logError = "";
+        logContent = "";
+        StateHasChanged();
+        
+        try
+        {
+            // Debug log
+            Console.WriteLine($"[DEBUG] ShowBackupLog called for operationId: {operationId}");
+            
+            var logResult = await BackupService.GetBackupLogAsync(operationId);
+            
+            if (!string.IsNullOrEmpty(logResult))
+            {
+                logContent = logResult;
+                Console.WriteLine($"[DEBUG] Log loaded successfully, length: {logContent.Length}");
+            }
+            else
+            {
+                logError = $"Nie znaleziono logu dla ID: {operationId}";
+                Console.WriteLine($"[DEBUG] No log found for ID: {operationId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            logError = $"Błąd ładowania logu: {ex.Message}";
+            Console.WriteLine($"[DEBUG] Exception in ShowBackupLog: {ex}");
+        }
+        finally
+        {
+            isLoadingLog = false;
+            StateHasChanged();
+        }
+    }
+    
+    private void CloseLogModal()
+    {
+        showLogModal = false;
+        currentLogOperationId = "";
+        logContent = "";
+        logError = "";
+    }
+    
+    private async Task DownloadCurrentLog()
+    {
+        if (!string.IsNullOrEmpty(currentLogOperationId))
+        {
+            await JSRuntime.InvokeVoidAsync("open", $"/api/backup/log/{currentLogOperationId}?download=true", "_blank");
+        }
+    }
+    
+    private string FormatDateTime(DateTime? dateTime)
+    {
+        if (!dateTime.HasValue) return "-";
+        return dateTime.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    }
+    
+    private string FormatDuration(string? duration)
+    {
+        if (string.IsNullOrEmpty(duration)) return "-";
+        
+        // Try to parse duration in format "HH:mm:ss.fff"
+        var parts = duration.Split(':');
+        if (parts.Length >= 2)
+        {
+            var seconds = parts.Length > 2 ? parts[2].Split('.')[0] : "0";
+            return $"{parts[0]}h {parts[1]}m {seconds}s";
+        }
+        
+        return duration;
+    }
+    
+    private string GetSummaryPath(BackupService.BackupHistoryItem item)
+    {
+        return item.SummaryTxtPath ?? item.SummaryJsonPath ?? "";
+    }
+    
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes == 0) return "0 B";
+        
+        var units = new[] { "B", "KB", "MB", "GB", "TB", "PB" };
+        var unitIndex = 0;
+        var size = (double)bytes;
+        
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+        
+        var decimals = size < 10 ? 2 : size < 100 ? 1 : 0;
+        return $"{size.ToString($"F{decimals}")} {units[unitIndex]}";
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        if (backupSubscription != null)
+        {
+            await backupSubscription.DisposeAsync();
+        }
+    }
+}

@@ -19,16 +19,7 @@
     <span id="src-banner-size" class="muted" style="margin-left:.5rem"></span>
   </div>
 
-  <div id="usb    (async ()=>{ await refreshAll(); })();
-
-    // SignalR connections - tylko jeśli biblioteka została załadowana
-    if (typeof signalR !== 'undefined') {
-      const conn=new signalR.HubConnectionBuilder().withUrl('/hubs/disks').withAutomaticReconnect().build();
-      conn.on('deviceAdded',evt=>{ showToast(`Wykryto nowe urządzenie (USB?): ${evt.name}. Kliknij „Odśwież".`); });
-      conn.on('deviceRemoved',evt=>{ showToast(`Odłączono urządzenie: ${evt.path}. Kliknij „Odśwież".`); });
-      conn.start().catch(err=>console.error('SignalR error:',err));
-
-      const bconn=new signalR.HubConnectionBuilder().withUrl('/hubs/backup').withAutomaticReconnect().build(); class="banner bad" style="display:none">
+  <div id="usb-banner" class="banner bad" style="display:none">
     <strong>Brak kwalifikującego się dysku USB.</strong>
     <span class="muted">Wymagany label <code>USB_BACKUP</code> i rozmiar &gt; 0 B. Podłącz dysk i kliknij „Odśwież”.</span>
   </div>
@@ -176,11 +167,11 @@
 
   <div class="toast" id="toast"></div>
 
-  <!-- SignalR - używamy alternatywnej wersji lub wyłączamy -->
+  <!-- SignalR wyłączony - powoduje błędy MIME type -->
   <script>
-    // Tymczasowo wyłączamy SignalR żeby nie blokować reszty aplikacji
+    // Mock SignalR żeby aplikacja nie crashowała
     window.signalR = null;
-    console.log('SignalR disabled temporarily to fix other issues');
+    console.log('SignalR disabled - using polling instead of real-time updates');
   </script>
   <script>
     async function fetchJson(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
@@ -188,6 +179,7 @@
     function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',5000); }
     function dtLocal(iso){ try{ return new Date(iso).toLocaleString(); }catch{ return iso; } }
     
+    // Globalne funkcje pomocnicze
     function formatGB(bytes) {
       if (!bytes || bytes <= 0) return '-';
       return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
@@ -470,6 +462,28 @@
     function renderTable(data){
       const tb=document.querySelector('#grid tbody'); tb.innerHTML='';
       
+      function formatGB(bytes) {
+        if (!bytes || bytes <= 0) return '-';
+        return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+      }
+      
+      function calculateDiskUsage(partitions) {
+        let totalUsed = 0;
+        let totalFree = 0;
+        let hasData = false;
+        
+        for (const p of partitions) {
+          if (p.usedBytes && p.freeBytes) {
+            totalUsed += p.usedBytes;
+            totalFree += p.freeBytes;
+            hasData = true;
+          }
+        }
+        
+        if (!hasData) return '-';
+        return formatGB(totalUsed) + ' / ' + formatGB(totalFree);
+      }
+      
       for(const d of data){
         const diskLabel=(d.partitions||[]).map(p=>p.label).find(x=>!!x)||'';
         const firstMount=(d.partitions||[]).map(p=>p.mountPoint).find(x=>!!x)||'-';
@@ -720,13 +734,8 @@
 
     (async ()=>{ await refreshAll(); })();
 
-    const conn=new signalR.HubConnectionBuilder().withUrl('/hubs/disks').withAutomaticReconnect().build();
-    conn.on('deviceAdded',evt=>{ showToast(`Wykryto nowe urządzenie (USB?): ${evt.name}. Kliknij „Odśwież”.`); });
-    conn.on('deviceRemoved',evt=>{ showToast(`Odłączono urządzenie: ${evt.path}. Kliknij „Odśwież”.`); });
-    conn.start().catch(err=>console.error('SignalR error:',err));
-
-    // SignalR connections - tylko jeśli biblioteka została załadowana
-    if (typeof signalR !== 'undefined') {
+    // SignalR - tylko gdy dostępny
+    if (typeof signalR !== 'undefined' && signalR && signalR.HubConnectionBuilder) {
       const conn=new signalR.HubConnectionBuilder().withUrl('/hubs/disks').withAutomaticReconnect().build();
       conn.on('deviceAdded',evt=>{ showToast(`Wykryto nowe urządzenie (USB?): ${evt.name}. Kliknij „Odśwież".`); });
       conn.on('deviceRemoved',evt=>{ showToast(`Odłączono urządzenie: ${evt.path}. Kliknij „Odśwież".`); });
@@ -759,18 +768,19 @@
         await fetchCurrentStatus();
       }).catch(err=>console.error('Backup hub error:',err));
     } else {
-      console.warn('SignalR not available - real-time features disabled');
+      console.log('SignalR not available - using basic polling mode');
+      // Bez SignalR - podstawowe funkcje powinny działać
+      await fetchCurrentLog();
+      await fetchCurrentStatus();
     }    // Funkcje modala logów
     let currentLogOperationId = '';
     
     async function showBackupLog(operationId) {
-      console.log('showBackupLog called with:', operationId);
       try {
         currentLogOperationId = operationId;
         document.getElementById('log-operation-id').textContent = operationId;
         document.getElementById('log-content').textContent = 'Ładowanie logu...';
         document.getElementById('log-modal').style.display = 'block';
-        console.log('Modal should be visible now');
         
         const response = await fetch(`/api/backup/log/${operationId}`);
         if (!response.ok) {
@@ -780,9 +790,7 @@
         
         const logContent = await response.text();
         document.getElementById('log-content').textContent = logContent;
-        console.log('Log content loaded');
       } catch (error) {
-        console.error('Error in showBackupLog:', error);
         document.getElementById('log-content').textContent = `Błąd ładowania logu: ${error.message}`;
         console.error('Error loading backup log:', error);
       }
@@ -799,23 +807,21 @@
       }
     }
     
-    // Eksponuj funkcje globalnie dla onclick
+    // Eksponuj funkcje globalnie i dodaj event delegation
     window.showBackupLog = showBackupLog;
     window.closeLogModal = closeLogModal;
     window.downloadCurrentLog = downloadCurrentLog;
     
     // Event delegation dla przycisków logów
     document.addEventListener('click', function(event) {
-      console.log('Click event:', event.target, event.target.classList);
       if (event.target.classList.contains('log-btn')) {
         const operationId = event.target.getAttribute('data-operation-id');
-        console.log('Log button clicked, operationId:', operationId);
         if (operationId) {
           showBackupLog(operationId);
         }
       }
     });
-    
+
     // Zamykaj modal po kliknięciu poza nim
     window.addEventListener('click', function(event) {
       const modal = document.getElementById('log-modal');

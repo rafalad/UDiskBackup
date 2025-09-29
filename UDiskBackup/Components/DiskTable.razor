@@ -1,0 +1,138 @@
+@inject DiskInfoService DiskInfoService
+@inject BlazorSignalRService SignalRService
+@implements IAsyncDisposable
+
+<table id="grid">
+    <thead>
+        <tr>
+            <th>Urządzenie</th>
+            <th>Rodzaj</th>
+            <th>Transport</th>
+            <th>Vendor / Model</th>
+            <th>Rozmiar</th>
+            <th>Zajęte/Wolne</th>
+            <th>Rotational</th>
+            <th>Mount</th>
+            <th>Etykieta</th>
+            <th>Partycje</th>
+        </tr>
+    </thead>
+    <tbody>
+        @if (disks.Any())
+        {
+            @foreach (var disk in disks)
+            {
+                var diskLabel = disk.Partitions?.FirstOrDefault(p => !string.IsNullOrEmpty(p.Label))?.Label ?? "";
+                var firstMount = disk.Partitions?.FirstOrDefault(p => !string.IsNullOrEmpty(p.MountPoint))?.MountPoint ?? "-";
+                var diskUsage = CalculateDiskUsage(disk.Partitions ?? new List<PartitionModel>());
+                
+                <tr>
+                    <td>@disk.Path</td>
+                    <td><span class="label">@(disk.Type ?? "-")</span></td>
+                    <td><span class="label">@(disk.Transport ?? "-")</span></td>
+                    <td>@($"{disk.Vendor} {disk.Model}".Trim())</td>
+                    <td>@(disk.Size ?? "")</td>
+                    <td>@diskUsage</td>
+                    <td>@disk.Rotational</td>
+                    <td>@firstMount</td>
+                    <td>@diskLabel</td>
+                    <td>
+                        @if (disk.Partitions?.Any() == true)
+                        {
+                            @foreach (var partition in disk.Partitions)
+                            {
+                                var label = !string.IsNullOrEmpty(partition.Label) ? $", label: {partition.Label}" : "";
+                                <div>@partition.Path (@(partition.Fstype ?? "-"), @partition.Size, @(partition.MountPoint ?? "-")@label)</div>
+                            }
+                        }
+                    </td>
+                </tr>
+            }
+        }
+        else
+        {
+            <tr>
+                <td colspan="10" class="muted">@(isLoading ? "Ładowanie dysków..." : "Brak danych o dyskach.")</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    private List<DiskModel> disks = new();
+    private bool isLoading = true;
+    private ISignalRSubscription? diskSubscription;
+    
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadDisks();
+        
+        // Subscribe to disk changes for real-time updates
+        diskSubscription = SignalRService.SubscribeToDisks(this, OnDiskChanged);
+    }
+    
+    private async Task OnDiskChanged()
+    {
+        await RefreshAsync();
+    }
+    
+    public async Task RefreshAsync()
+    {
+        isLoading = true;
+        StateHasChanged();
+        await LoadDisks();
+    }
+    
+    private async Task LoadDisks()
+    {
+        try
+        {
+            disks = await DiskInfoService.GetAllDisksAsync();
+        }
+        catch (Exception ex)
+        {
+            disks = new List<DiskModel>();
+            Console.WriteLine($"Error loading disks: {ex.Message}");
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+        }
+    }
+    
+    private string CalculateDiskUsage(List<PartitionModel> partitions)
+    {
+        long totalUsed = 0;
+        long totalFree = 0;
+        bool hasData = false;
+        
+        foreach (var p in partitions)
+        {
+            if (p.UsedBytes.HasValue && p.FreeBytes.HasValue)
+            {
+                totalUsed += p.UsedBytes.Value;
+                totalFree += p.FreeBytes.Value;
+                hasData = true;
+            }
+        }
+        
+        if (!hasData) return "-";
+        
+        return $"{FormatGB(totalUsed)} / {FormatGB(totalFree)}";
+    }
+    
+    private string FormatGB(long bytes)
+    {
+        if (bytes <= 0) return "-";
+        return $"{(bytes / (1024.0 * 1024.0 * 1024.0)).ToString("F1")} GB";
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        if (diskSubscription != null)
+        {
+            await diskSubscription.DisposeAsync();
+        }
+    }
+}

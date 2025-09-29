@@ -1,14 +1,14 @@
 # ---------- build ----------
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
-COPY UDiskBackup.csproj ./
-RUN dotnet restore
+COPY UDiskBackup/UDiskBackup.csproj ./UDiskBackup/
+RUN dotnet restore UDiskBackup/UDiskBackup.csproj
 COPY . .
-RUN dotnet publish -c Release -o /out
+RUN dotnet publish UDiskBackup/UDiskBackup.csproj -c Release -o /out
 
 # ---------- runtime ----------
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
-ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+ENV ASPNETCORE_URLS=http://0.0.0.0:5101
 
 # narzędzia: lsblk/rsync/du + dbus + udev + udisks2 (dla udisksctl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,6 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=build /out ./
-EXPOSE 8080
+EXPOSE 5101
 ENTRYPOINT ["dotnet","UDiskBackup.dll"]
 

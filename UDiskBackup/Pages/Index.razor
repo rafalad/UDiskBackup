@@ -1,0 +1,560 @@
+@page "/"
+@inject BackupService BackupService
+@inject DiskInfoService DiskInfoService
+@inject SourceService SourceService
+@inject BlazorSignalRService SignalRService
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+
+<PageTitle>UDiskBackup</PageTitle>
+
+<h1>UDiskBackup</h1>
+
+<!-- Source Status Banner -->
+@if (!sourceStatus.IsAvailable)
+{
+    <div class="banner bad">
+        <strong>Źródło niedostępne.</strong>
+        <span class="muted">Sprawdź, czy katalog źródłowy jest zamontowany i czytelny.</span>
+    </div>
+}
+else
+{
+    <div class="banner ok">
+        <strong>Źródło dostępne:</strong>
+        <span class="muted">@sourceStatus.Path</span>
+        <span class="muted" style="margin-left:.5rem">
+            @if (sourceStatus.UsedBytes.HasValue)
+            {
+                @($"— zajętość ~ {FormatBytes(sourceStatus.UsedBytes.Value)}")
+            }
+        </span>
+    </div>
+}
+
+<!-- USB Status Banner -->
+@if (eligibleUsbCount == 0)
+{
+    <div class="banner bad">
+        <strong>Brak kwalifikującego się dysku USB.</strong>
+        <span class="muted">Wymagany label <code>USB_BACKUP</code> i rozmiar &gt; 0 B. Podłącz dysk i kliknij „Odśwież".</span>
+    </div>
+}
+else
+{
+    <div class="banner ok">
+        <strong>Wykryto dysk@(eligibleUsbCount > 1 ? "i" : "") USB (USB_BACKUP):</strong>
+        <span class="muted">wykryto @eligibleUsbCount</span>
+    </div>
+}
+
+<!-- Backup Controls -->
+<div class="panel" style="margin-bottom:1rem">
+    <div class="actions">
+        <strong>Backup do USB</strong>
+        <select @bind="selectedTarget" class="btn" style="min-width:280px" disabled="@(!backupTargets.Any())">
+            @if (!backupTargets.Any())
+            {
+                <option value="">Brak kwalifikujących się dysków USB</option>
+            }
+            else
+            {
+                @foreach (var target in backupTargets)
+                {
+                    <option value="@target.MountPoint">@target.MountPoint (@target.FsType) — wolne @FormatBytes(target.FreeBytes) z @FormatBytes(target.TotalBytes)</option>
+                }
+            }
+        </select>
+        <button class="btn" @onclick="PlanBackup" disabled="@(!CanPlan)">Sprawdź miejsce</button>
+        <button class="btn" @onclick="StartBackup" disabled="@(!CanStart)">Start backup</button>
+        <button class="btn" @onclick="StopBackup" style="background-color: #dc3545; color: white;" disabled="@(!CanStop)">Stop backup</button>
+        <span class="muted">@planMessage</span>
+    </div>
+
+    <!-- Live Log Viewer -->
+    <div class="panel" style="margin-bottom: 1rem; padding: 10px; background-color: #f8f9fa;">
+        <div class="actions">
+            <strong>Podsumowanie dysków:</strong>
+            <span class="muted">@disksSummary</span>
+        </div>
+
+        <div class="log-toolbar">
+            <strong>Live podgląd:</strong>
+            <label><input type="checkbox" @bind="filterInfo" @bind:after="ApplyLogFilters"> INFO</label>
+            <label><input type="checkbox" @bind="filterProgress" @bind:after="ApplyLogFilters"> PROGRESS</label>
+            <label><input type="checkbox" @bind="filterError" @bind:after="ApplyLogFilters"> ERROR</label>
+            <label><input type="checkbox" @bind="autoScroll"> Autoscroll</label>
+            <button class="btn" @onclick="ClearLog">Wyczyść</button>
+            <a class="btn" href="/api/backup/current-log?download=1">Pobierz bieżący log</a>
+        </div>
+        <div class="logview" style="max-height: 300px; overflow-y: auto;">
+            @foreach (var logEntry in backupLogs)
+            {
+                <div class="logline @logEntry.Level" style="display: @(IsLogVisible(logEntry.Level))">
+                    <span class="ts">@logEntry.Timestamp.ToString("HH:mm:ss")</span>
+                    <span class="msg">@logEntry.Message</span>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+<!-- Controls Row -->
+<div class="row">
+    <div class="panel">
+        <div class="actions" style="gap:.5rem;flex-wrap:wrap">
+            <button class="btn" @onclick="RefreshAll">Odśwież</button>
+            <button class="btn" @onclick="MountUsb">Zamontuj USB_BACKUP</button>
+            <button class="btn" @onclick="UnmountUsb">Odmontuj i wysuń</button>
+            <span class="muted">Skanowanie ręczne i kontrola montowania.</span>
+        </div>
+        <hr style="border:none;border-top:1px solid var(--bd);margin:.8rem 0">
+        
+        <UsbMonitor />
+    </div>
+
+    <div class="panel">
+        <div class="actions" style="justify-content:space-between">
+            <div><strong>Wszystkie dyski</strong></div>
+        </div>
+        <DiskTable />
+    </div>
+</div>
+
+<!-- Backup History -->
+<BackupHistory />
+
+<!-- Version Information (simplified for now) -->
+<div class="panel" style="margin-top: 2rem; background-color: #f8f9fa; border: 1px solid #e9ecef;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <strong>Informacje o systemie</strong>
+        <button class="btn" @onclick="ToggleVersionDetails">@(showVersionDetails ? "Ukryj szczegóły" : "Pokaż szczegóły")</button>
+    </div>
+    <div style="display: @(showVersionDetails ? "none" : "block");">
+        <span class="muted">@versionSummary</span>
+    </div>
+    @if (showVersionDetails)
+    {
+        <div style="margin-top: 1rem; font-family: monospace; font-size: 0.9em;">
+            <div><strong>Wersja aplikacji:</strong> v1.0.0</div>
+            <div><strong>Data kompilacji:</strong> 2024-12-29</div>
+            <div><strong>Git commit:</strong> main...</div>
+            <div><strong>Git branch:</strong> main</div>
+            <div><strong>Framework:</strong> .NET 8</div>
+            <div><strong>System operacyjny:</strong> Linux</div>
+            <div><strong>Architektura:</strong> x64</div>
+        </div>
+    }
+</div>
+
+@code {
+    // State variables
+    private SourceStatusModel sourceStatus = new();
+    private List<BackupTargetModel> backupTargets = new();
+    private int eligibleUsbCount = 0;
+    private string selectedTarget = "";
+    private string planMessage = "";
+    private BackupPlanModel? currentPlan;
+    private string disksSummary = "Ładowanie...";
+    
+    // Log viewer state
+    private List<LogEntry> backupLogs = new();
+    private bool filterInfo = true;
+    private bool filterProgress = true;
+    private bool filterError = true;
+    private bool autoScroll = true;
+    
+    // Version info state
+    private bool showVersionDetails = false;
+    private string versionSummary = "Ładowanie informacji o wersji...";
+    
+    // Backup status
+    private BackupStatusModel backupStatus = new();
+    
+    // SignalR subscriptions
+    private ISignalRSubscription? diskSubscription;
+    private ISignalRSubscription? backupSubscription;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAll();
+        
+        // Setup SignalR subscriptions for real-time updates
+        diskSubscription = SignalRService.SubscribeToDisks(this, OnDiskDeviceChanged);
+        backupSubscription = SignalRService.SubscribeToBackup(this, OnBackupLog, OnBackupStatus);
+    }
+
+    private async Task RefreshAll()
+    {
+        await LoadSourceStatus();
+        await LoadBackupTargets();
+        await LoadDisksSummary();
+        await LoadVersionInfo();
+        await LoadBackupStatus();
+        StateHasChanged();
+    }
+    
+    private async Task LoadSourceStatus()
+    {
+        try
+        {
+            var status = await SourceService.GetStatusAsync();
+            sourceStatus = new SourceStatusModel
+            {
+                IsAvailable = status.Exists && status.Readable,
+                Path = status.Path,
+                UsedBytes = status.UsedBytes
+            };
+        }
+        catch (Exception ex)
+        {
+            sourceStatus = new SourceStatusModel { IsAvailable = false, Path = "/mnt/shared" };
+            Console.WriteLine($"Error loading source status: {ex.Message}");
+        }
+    }
+    
+    private async Task LoadBackupTargets()
+    {
+        try
+        {
+            backupTargets = await BackupService.GetTargetsAsync();
+            eligibleUsbCount = backupTargets.Count;
+            
+            // Auto-select first target if available
+            if (backupTargets.Any() && string.IsNullOrEmpty(selectedTarget))
+            {
+                selectedTarget = backupTargets.First().MountPoint;
+            }
+        }
+        catch (Exception ex)
+        {
+            backupTargets = new List<BackupTargetModel>();
+            eligibleUsbCount = 0;
+            Console.WriteLine($"Error loading backup targets: {ex.Message}");
+        }
+    }
+    
+    private async Task LoadDisksSummary()
+    {
+        try
+        {
+            var summary = await DiskInfoService.GetSummaryAsync();
+            disksSummary = $"{summary.TotalDisks} dysków, {summary.TotalSizeGB} GB całkowicie ({summary.UsedSizeGB} GB użyte, {summary.FreeSizeGB} GB wolne)";
+        }
+        catch (Exception ex)
+        {
+            disksSummary = "Błąd ładowania podsumowania dysków";
+            Console.WriteLine($"Error loading disks summary: {ex.Message}");
+        }
+    }
+    
+    private Task LoadVersionInfo()
+    {
+        try
+        {
+            // This would need to be implemented as an API call
+            // For now, just placeholder
+            versionSummary = "v1.0.0 (main) - 2024-12-29";
+            return Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            versionSummary = "Błąd ładowania informacji o wersji";
+            Console.WriteLine($"Error loading version info: {ex.Message}");
+            return Task.CompletedTask;
+        }
+    }
+    
+    private Task LoadBackupStatus()
+    {
+        try
+        {
+            backupStatus = BackupService.GetStatusAsync();
+            return Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            backupStatus = new BackupStatusModel { State = "Idle", Message = "Ready" };
+            Console.WriteLine($"Error loading backup status: {ex.Message}");
+            return Task.CompletedTask;
+        }
+    }
+    
+    private async Task PlanBackup()
+    {
+        if (string.IsNullOrEmpty(selectedTarget))
+        {
+            planMessage = "Wybierz cel USB";
+            return;
+        }
+        
+        if (!sourceStatus.IsAvailable)
+        {
+            planMessage = $"Źródło {sourceStatus.Path} niedostępne";
+            return;
+        }
+        
+        try
+        {
+            var plan = await BackupService.PlanAsync(selectedTarget);
+            currentPlan = BackupPlanModel.FromBackupPlan(plan);
+            var needStr = FormatBytes(currentPlan.EstimatedBytes);
+            var freeStr = FormatBytes(currentPlan.FreeBytes);
+            planMessage = $"{(currentPlan.EnoughSpace ? "OK" : "ZA MAŁO MIEJSCA")} — potrzeba {needStr}, wolne {freeStr}. Katalog docelowy: {currentPlan.TargetBackupDir}";
+            
+            if (!currentPlan.EnoughSpace)
+            {
+                await ShowToast($"Za mało miejsca: potrzeba {needStr}, wolne {freeStr}.");
+            }
+        }
+        catch (Exception ex)
+        {
+            planMessage = $"Błąd planowania: {ex.Message}";
+            currentPlan = null;
+            Console.WriteLine($"Error planning backup: {ex.Message}");
+        }
+        StateHasChanged();
+    }
+    
+    private async Task StartBackup()
+    {
+        ClearLog();
+        
+        if (string.IsNullOrEmpty(selectedTarget))
+        {
+            planMessage = "Wybierz cel USB";
+            return;
+        }
+        
+        if (!sourceStatus.IsAvailable)
+        {
+            planMessage = $"Źródło {sourceStatus.Path} niedostępne";
+            return;
+        }
+        
+        try
+        {
+            // Verify plan first
+            var plan = await BackupService.PlanAsync(selectedTarget);
+            if (!plan.EnoughSpace)
+            {
+                var needStr = FormatBytes(plan.EstimatedBytes);
+                var freeStr = FormatBytes(plan.FreeBytes);
+                planMessage = $"ZA MAŁO MIEJSCA — potrzeba {needStr}, wolne {freeStr}.";
+                await ShowToast($"Nie mogę wystartować: za mało miejsca (potrzeba {needStr}, wolne {freeStr}).");
+                return;
+            }
+            
+            // Start backup
+            var operationId = await BackupService.StartAsync(selectedTarget);
+            AddLogEntry("info", $"Start backup (opId {operationId})");
+            
+            // Load current status
+            await LoadBackupStatus();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            AddLogEntry("error", $"Błąd uruchamiania: {ex.Message}");
+            Console.WriteLine($"Error starting backup: {ex.Message}");
+        }
+    }
+    
+    private async Task StopBackup()
+    {
+        try
+        {
+            var result = await BackupService.StopAsync();
+            AddLogEntry("info", result.Message);
+            
+            await LoadBackupStatus();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            AddLogEntry("error", $"Błąd zatrzymywania: {ex.Message}");
+            Console.WriteLine($"Error stopping backup: {ex.Message}");
+        }
+    }
+    
+    private async Task MountUsb()
+    {
+        try
+        {
+            // This would need implementation in the service layer
+            await ShowToast("Funkcja montowania będzie dostępna po implementacji w warstwie serwisów");
+        }
+        catch (Exception ex)
+        {
+            await ShowToast($"Błąd montowania: {ex.Message}");
+        }
+    }
+    
+    private async Task UnmountUsb()
+    {
+        try
+        {
+            // This would need implementation in the service layer
+            await ShowToast("Funkcja odmontowywania będzie dostępna po implementacji w warstwie serwisów");
+        }
+        catch (Exception ex)
+        {
+            await ShowToast($"Błąd odmontowania: {ex.Message}");
+        }
+    }
+    
+    private void ToggleVersionDetails()
+    {
+        showVersionDetails = !showVersionDetails;
+    }
+    
+    private void ClearLog()
+    {
+        backupLogs.Clear();
+        StateHasChanged();
+    }
+    
+    private async Task ApplyLogFilters()
+    {
+        StateHasChanged();
+        if (autoScroll)
+        {
+            await ScrollToBottom();
+        }
+    }
+    
+    private void AddLogEntry(string level, string message)
+    {
+        backupLogs.Add(new LogEntry
+        {
+            Level = level,
+            Message = message,
+            Timestamp = DateTime.Now
+        });
+        
+        // Keep log size reasonable
+        if (backupLogs.Count > 1000)
+        {
+            backupLogs.RemoveRange(0, 100);
+        }
+        
+        StateHasChanged();
+        
+        if (autoScroll)
+        {
+            InvokeAsync(ScrollToBottom);
+        }
+    }
+    
+    private async Task ScrollToBottom()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("eval", "document.querySelector('.logview').scrollTop = document.querySelector('.logview').scrollHeight");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error scrolling to bottom: {ex.Message}");
+        }
+    }
+    
+    private async Task ShowToast(string message)
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("showToast", message);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error showing toast: {ex.Message}");
+        }
+    }
+    
+    // Computed properties
+    private bool CanPlan => sourceStatus.IsAvailable && !string.IsNullOrEmpty(selectedTarget);
+    private bool CanStart => sourceStatus.IsAvailable && !string.IsNullOrEmpty(selectedTarget) && 
+                            (currentPlan == null || currentPlan.EnoughSpace) && 
+                            backupStatus.State != "Running";
+    private bool CanStop => backupStatus.State == "Running";
+    
+    private string IsLogVisible(string level)
+    {
+        return level switch
+        {
+            "error" => filterError ? "block" : "none",
+            "progress" => filterProgress ? "block" : "none",
+            _ => filterInfo ? "block" : "none"
+        };
+    }
+    
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes == 0) return "0 B";
+        
+        var units = new[] { "B", "KB", "MB", "GB", "TB", "PB" };
+        var unitIndex = 0;
+        var size = (double)bytes;
+        
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+        
+        var decimals = size < 10 ? 2 : size < 100 ? 1 : 0;
+        return $"{size.ToString($"F{decimals}")} {units[unitIndex]}";
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        if (diskSubscription != null)
+        {
+            await diskSubscription.DisposeAsync();
+        }
+        if (backupSubscription != null)
+        {
+            await backupSubscription.DisposeAsync();
+        }
+    }
+    
+    // SignalR event handlers
+    private async Task OnDiskDeviceChanged()
+    {
+        await LoadBackupTargets();
+        await LoadDisksSummary();
+        await InvokeAsync(StateHasChanged);
+    }
+    
+    private async Task OnBackupLog(string level, string message)
+    {
+        AddLogEntry(level, message);
+        await InvokeAsync(StateHasChanged);
+    }
+    
+    private async Task OnBackupStatus(string operationId, string state, string message)
+    {
+        backupStatus.OperationId = operationId;
+        backupStatus.State = state;
+        backupStatus.Message = message;
+        
+        AddLogEntry("info", $"[{state}] {message}");
+        
+        // Refresh history when backup completes
+        if (state == "Completed" || state == "Failed" || state == "Cancelled" || state == "Stopped")
+        {
+            await Task.Delay(1000); // Small delay to ensure files are written
+            // Trigger refresh of backup history component
+        }
+        
+        await InvokeAsync(StateHasChanged);
+    }
+    
+    // Helper classes
+    private class LogEntry
+    {
+        public string Level { get; set; } = "";
+        public string Message { get; set; } = "";
+        public DateTime Timestamp { get; set; }
+    }
+}
