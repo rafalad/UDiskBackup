@@ -87,6 +87,20 @@ public class BlazorSignalRService : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Inicjalizuje połączenia SignalR - symuluje test połączenia
+    /// </summary>
+    public async Task InitializeAsync()
+    {
+        // W rzeczywistej implementacji Blazor Server, hubContext jest już gotowy
+        // Tutaj symulujemy test połączenia
+        await Task.Delay(200);
+        
+        // Testuj czy można wysłać wiadomość testową
+        await _diskHubContext.Clients.All.SendAsync("InitializationTest");
+        await _backupHubContext.Clients.All.SendAsync("InitializationTest");
+    }
+
     public async ValueTask DisposeAsync()
     {
         foreach (var subscription in _subscriptions)

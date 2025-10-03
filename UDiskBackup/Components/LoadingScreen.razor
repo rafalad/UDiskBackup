@@ -1,0 +1,318 @@
+@using UDiskBackup.Services
+@inject InitializationService InitService
+@inject IJSRuntime JSRuntime
+
+<div class="loading-screen">
+    <div class="loading-container">
+        <div class="loading-header">
+            <h1>🔄 UDiskBackup</h1>
+            <p>Inicjalizacja aplikacji...</p>
+        </div>
+
+        <div class="loading-steps">
+            @foreach (var step in _steps)
+            {
+                <div class="loading-step @GetStepClass(step.Status)" data-step="@step.Id">
+                    <div class="step-icon">
+                        @switch (step.Status)
+                        {
+                            case InitializationStatus.Pending:
+                                <span class="icon">⏳</span>
+                                break;
+                            case InitializationStatus.Loading:
+                                <span class="icon loading-spinner">🔄</span>
+                                break;
+                            case InitializationStatus.Success:
+                                <span class="icon">✅</span>
+                                break;
+                            case InitializationStatus.Warning:
+                                <span class="icon">⚠️</span>
+                                break;
+                            case InitializationStatus.Error:
+                                <span class="icon">❌</span>
+                                break;
+                        }
+                    </div>
+                    <div class="step-content">
+                        <div class="step-title">@step.Title</div>
+                        <div class="step-message">@step.Message</div>
+                        @if (step.CompletedAt.HasValue)
+                        {
+                            <div class="step-time">@step.CompletedAt.Value.ToString("HH:mm:ss")</div>
+                        }
+                    </div>
+                    <div class="step-progress">
+                        @if (step.Status == InitializationStatus.Loading)
+                        {
+                            <div class="progress-bar">
+                                <div class="progress-fill"></div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+
+        <div class="loading-footer">
+            <div class="loading-progress">
+                <div class="progress-text">
+                    @_completedSteps z @_totalSteps kroków ukończonych
+                </div>
+                <div class="overall-progress">
+                    <div class="overall-progress-bar" style="width: @(_progressPercentage)%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .loading-screen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    .loading-container {
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        max-width: 500px;
+        width: 90%;
+        animation: slideUp 0.6s ease-out;
+    }
+
+    @@keyframes slideUp {
+        from {
+            opacity: 0;
+            transform: translateY(30px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .loading-header {
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+
+    .loading-header h1 {
+        margin: 0 0 0.5rem 0;
+        color: #333;
+        font-size: 2rem;
+    }
+
+    .loading-header p {
+        margin: 0;
+        color: #666;
+        font-size: 1.1rem;
+    }
+
+    .loading-steps {
+        margin-bottom: 1.5rem;
+    }
+
+    .loading-step {
+        display: flex;
+        align-items: center;
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+        border-left: 4px solid transparent;
+    }
+
+    .loading-step.pending {
+        background: #f8f9fa;
+        border-left-color: #dee2e6;
+    }
+
+    .loading-step.loading {
+        background: #e3f2fd;
+        border-left-color: #2196f3;
+        animation: pulse 2s infinite;
+    }
+
+    .loading-step.success {
+        background: #e8f5e8;
+        border-left-color: #4caf50;
+        animation: successBounce 0.6s ease-out;
+    }
+
+    .loading-step.warning {
+        background: #fff3e0;
+        border-left-color: #ff9800;
+    }
+
+    .loading-step.error {
+        background: #ffebee;
+        border-left-color: #f44336;
+    }
+
+    @@keyframes pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.02); }
+    }
+
+    @@keyframes successBounce {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+        100% { transform: scale(1); }
+    }
+
+    .step-icon {
+        margin-right: 1rem;
+        font-size: 1.5rem;
+        width: 2rem;
+        text-align: center;
+    }
+
+    .loading-spinner {
+        animation: spin 1s linear infinite;
+    }
+
+    @@keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    .step-content {
+        flex: 1;
+    }
+
+    .step-title {
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 0.25rem;
+    }
+
+    .step-message {
+        color: #666;
+        font-size: 0.9rem;
+    }
+
+    .step-time {
+        color: #999;
+        font-size: 0.8rem;
+        margin-top: 0.25rem;
+    }
+
+    .step-progress {
+        width: 100px;
+        margin-left: 1rem;
+    }
+
+    .progress-bar {
+        height: 4px;
+        background: #e0e0e0;
+        border-radius: 2px;
+        overflow: hidden;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #2196f3, #21cbf3);
+        border-radius: 2px;
+        animation: progressMove 1.5s ease-in-out infinite;
+    }
+
+    @@keyframes progressMove {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+    }
+
+    .loading-footer {
+        border-top: 1px solid #eee;
+        padding-top: 1rem;
+    }
+
+    .progress-text {
+        text-align: center;
+        color: #666;
+        margin-bottom: 0.5rem;
+        font-size: 0.9rem;
+    }
+
+    .overall-progress {
+        height: 8px;
+        background: #e0e0e0;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .overall-progress-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #4caf50, #8bc34a);
+        border-radius: 4px;
+        transition: width 0.5s ease;
+    }
+</style>
+
+@code {
+    private List<InitializationStep> _steps = new();
+    private int _completedSteps = 0;
+    private int _totalSteps = 0;
+    private double _progressPercentage = 0;
+
+    [Parameter] public EventCallback OnInitializationComplete { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await InitializeApplication();
+    }
+
+    private async Task InitializeApplication()
+    {
+        _steps = await InitService.InitializeApplicationAsync(OnStepUpdate);
+    }
+
+    private async void OnStepUpdate(InitializationStep step)
+    {
+        await InvokeAsync(() =>
+        {
+            UpdateProgress();
+            StateHasChanged();
+        });
+
+        // Jeśli wszystkie kroki są ukończone (bez względu na status)
+        if (_steps.All(s => s.Status != InitializationStatus.Pending && s.Status != InitializationStatus.Loading))
+        {
+            await Task.Delay(1000); // Pokaż wyniki przez sekundę
+            await OnInitializationComplete.InvokeAsync();
+        }
+    }
+
+    private void UpdateProgress()
+    {
+        _totalSteps = _steps.Count;
+        _completedSteps = _steps.Count(s => s.Status == InitializationStatus.Success || 
+                                          s.Status == InitializationStatus.Warning || 
+                                          s.Status == InitializationStatus.Error);
+        
+        _progressPercentage = _totalSteps > 0 ? (_completedSteps * 100.0 / _totalSteps) : 0;
+    }
+
+    private string GetStepClass(InitializationStatus status)
+    {
+        return status switch
+        {
+            InitializationStatus.Pending => "pending",
+            InitializationStatus.Loading => "loading",
+            InitializationStatus.Success => "success",
+            InitializationStatus.Warning => "warning",
+            InitializationStatus.Error => "error",
+            _ => "pending"
+        };
+    }
+}

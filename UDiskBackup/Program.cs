@@ -14,6 +14,9 @@ builder.Services.AddHostedService<UDisksMonitor>();
 // Dodaj Blazor SignalR Service
 builder.Services.AddScoped<BlazorSignalRService>();
 
+// Dodaj Initialization Service
+builder.Services.AddScoped<InitializationService>();
+
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
 

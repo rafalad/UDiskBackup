@@ -1,12 +1,36 @@
-<Router AppAssembly="@typeof(App).Assembly">
-    <Found Context="routeData">
-        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
-        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
-    </Found>
-    <NotFound>
-        <PageTitle>Not found</PageTitle>
-        <LayoutView Layout="@typeof(MainLayout)">
-            <p role="alert">Sorry, there's nothing at this address.</p>
-        </LayoutView>
-    </NotFound>
-</Router>
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components.Forms  
+@using Microsoft.AspNetCore.Components.Routing
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using UDiskBackup.Components
+
+@if (_isInitialized)
+{
+    <Router AppAssembly="@typeof(App).Assembly">
+        <Found Context="routeData">
+            <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+            <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+        </Found>
+        <NotFound>
+            <PageTitle>Nie znaleziono</PageTitle>
+            <LayoutView Layout="@typeof(MainLayout)">
+                <p role="alert">Przepraszamy, nie ma nic pod tym adresem.</p>
+            </LayoutView>
+        </NotFound>
+    </Router>
+}
+else
+{
+    <LoadingScreen OnInitializationComplete="OnInitializationComplete" />
+}
+
+@code {
+    private bool _isInitialized = false;
+
+    private async Task OnInitializationComplete()
+    {
+        _isInitialized = true;
+        await InvokeAsync(StateHasChanged);
+    }
+}

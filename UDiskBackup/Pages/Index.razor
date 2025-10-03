@@ -1,4 +1,6 @@
 @page "/"
+@using Microsoft.AspNetCore.Components.Web
+@using UDiskBackup.Components
 @inject BackupService BackupService
 @inject DiskInfoService DiskInfoService
 @inject SourceService SourceService
@@ -270,15 +272,22 @@ else
     {
         try
         {
-            backupStatus = BackupService.GetStatusAsync();
-            return Task.CompletedTask;
+            var status = BackupService.GetCurrentStatus();
+            if (status != null)
+            {
+                backupStatus = BackupStatusModel.FromBackupStatus(status);
+            }
+            else
+            {
+                backupStatus = new BackupStatusModel { State = "Idle", Message = "Ready" };
+            }
         }
         catch (Exception ex)
         {
             backupStatus = new BackupStatusModel { State = "Idle", Message = "Ready" };
             Console.WriteLine($"Error loading backup status: {ex.Message}");
-            return Task.CompletedTask;
         }
+        return Task.CompletedTask;
     }
     
     private async Task PlanBackup()
